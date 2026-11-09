@@ -10,8 +10,8 @@ from pathlib import Path
 import pyqtgraph as pg
 import serial
 import serial.tools.list_ports
-from PyQt5.QtCore import QSettings, QThread, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtCore import QRectF, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -20,6 +20,52 @@ from PyQt5.QtWidgets import (
 
 from encoder_core import (MeasurementCalculator, RESOLUTION, WHEEL_CIRCUMFERENCE_M,
                           parse_position_response, position_request)
+from encoder_stats import SpeedStats
+
+
+MAX_CHART_MINUTES = 60
+
+
+class SpeedGauge(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.speed = None
+        self.limit = 5.0
+        self.setMinimumSize(250, 190)
+
+    def set_value(self, speed, limit):
+        self.speed, self.limit = speed, limit
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        side = min(self.width() - 36, self.height() - 48, 300)
+        rect = QRectF((self.width() - side) / 2, max(8, (self.height() - side - 30) / 2), side, side)
+        pen = QPen(QColor("#dce8f1"), 12, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawArc(rect, 225 * 16, -270 * 16)
+        if self.speed is not None:
+            fraction = max(0.0, min(1.0, (self.speed / self.limit + 1) / 2))
+            pen.setColor(QColor("#0878a0"))
+            painter.setPen(pen)
+            painter.drawArc(rect, 225 * 16, int(-270 * 16 * fraction))
+        painter.setPen(QColor("#103f6a"))
+        font = painter.font()
+        font.setPointSize(24)
+        font.setBold(True)
+        painter.setFont(font)
+        text = "--" if self.speed is None else f"{self.speed:.3f}"
+        painter.drawText(QRectF(0, rect.top() + side * .30, self.width(), 55),
+                         Qt.AlignCenter, text)
+        font.setPointSize(11)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.drawText(QRectF(0, rect.top() + side * .30 + 50, self.width(), 28),
+                         Qt.AlignCenter, "实时速度  m/s")
+        painter.setPen(QColor("#536d83"))
+        painter.drawText(QRectF(0, rect.bottom() + 4, self.width(), 22),
+                         Qt.AlignCenter, f"量程  −{self.limit:.3f} 至 +{self.limit:.3f} m/s")
 
 
 def resource_path(name):
@@ -117,7 +163,8 @@ class EncoderDashboard(QMainWindow):
         self.history = {}
         self.confirmed_port = None
         self.simulation = False
-        self.settings = QSettings("BA ENG", "Encoder Monitor")
+        self.stats = SpeedStats()
+        self.last_long_redraw = 0.0
         self.output_dir = None
         self.init_ui()
         self.refresh_ports()
@@ -129,18 +176,18 @@ class EncoderDashboard(QMainWindow):
         self.setStyleSheet("""
             QMainWindow, QScrollArea { background: #eaf1f8; }
             QScrollArea { border: none; }
-            QWidget { color: #17314b; font-family: "Microsoft YaHei", "Segoe UI"; font-size: 13px; }
+            QWidget { color: #17314b; font-family: "Microsoft YaHei", "Segoe UI"; font-size: 11pt; }
             QWidget#dashboardCanvas { background: #eaf1f8; }
             QFrame#glassCard {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 rgba(255,255,255,250), stop:1 rgba(244,249,255,245));
                 border: 1px solid #d5e4f0; border-radius: 14px;
             }
-            QLabel#eyebrow { color: #637f99; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-            QLabel#sectionTitle { color: #1b3853; font-size: 16px; font-weight: 700; }
-            QLabel#metricValue { color: #103f6a; font-size: 30px; font-weight: 700; }
-            QLabel#detailValue { color: #183c5b; font-size: 17px; font-weight: 700; }
-            QLabel#muted { color: #61798e; font-size: 11px; }
+            QLabel#eyebrow { color: #526e87; font-size: 10pt; font-weight: 700; }
+            QLabel#sectionTitle { color: #1b3853; font-size: 14pt; font-weight: 700; }
+            QLabel#metricValue { color: #103f6a; font-size: 24pt; font-weight: 700; }
+            QLabel#detailValue { color: #183c5b; font-size: 17pt; font-weight: 700; }
+            QLabel#muted { color: #536e84; font-size: 10pt; }
             QPushButton { background: #f3f8fc; border: 1px solid #c9dbe9;
                 border-radius: 7px; padding: 7px 12px; color: #244b6b; }
             QPushButton:hover { background: #e3f0fa; }
@@ -162,7 +209,7 @@ class EncoderDashboard(QMainWindow):
         layout.setSpacing(14)
         notice = QLabel("BA ENG INTERNAL USE ONLY")
         notice.setObjectName("internalNotice")
-        notice.setStyleSheet("color: #b91c1c; font-size: 16px; font-weight: 900;")
+        notice.setStyleSheet("color: #b91c1c; font-size: 12pt; font-weight: 900;")
         layout.addWidget(notice)
         heading = QHBoxLayout()
         logo = QLabel()
@@ -173,7 +220,7 @@ class EncoderDashboard(QMainWindow):
         eyebrow = QLabel("MOTION MONITOR / ENCODER")
         eyebrow.setObjectName("eyebrow")
         title = QLabel("板链运行监控")
-        title.setStyleSheet("font-size: 27px; font-weight: 800; color: #153956;")
+        title.setStyleSheet("font-size: 22pt; font-weight: 800; color: #153956;")
         subtitle = QLabel("RS485 · 200 mm 计米轮    /    作者 YD")
         subtitle.setObjectName("muted")
         heading_text.addWidget(eyebrow)
@@ -239,19 +286,7 @@ class EncoderDashboard(QMainWindow):
         self.simulation_button = QPushButton("模拟输入设置…")
         self.simulation_button.clicked.connect(self.show_simulation_dialog)
         buttons.addWidget(self.simulation_button, 2, 0)
-        self.photo_button = QPushButton("选择编码器照片…")
-        self.photo_button.clicked.connect(self.select_photo)
-        buttons.addWidget(self.photo_button, 2, 1)
         controls.addLayout(buttons, 2)
-        photo_layout = QVBoxLayout()
-        self.photo = QLabel()
-        self.photo.setAlignment(Qt.AlignCenter)
-        self.photo.setFixedSize(90, 105)
-        self.photo.setWordWrap(True)
-        photo_layout.addWidget(self.photo)
-        photo_layout.addStretch()
-        controls.addLayout(photo_layout)
-        self.load_photo(self.settings.value("encoder_photo", "", type=str))
         control_layout.addLayout(controls)
         storage = QHBoxLayout()
         self.output_label = QLabel("未选择数据保存目录")
@@ -264,34 +299,42 @@ class EncoderDashboard(QMainWindow):
         control_layout.addLayout(storage)
         range_warning = QLabel("真实编码器计数存在量程；连续运转跨越边界可能产生错误，请核实设备量程。")
         range_warning.setWordWrap(True)
-        range_warning.setStyleSheet("color: #915300; font-size: 11px; font-weight: 600;")
+        range_warning.setStyleSheet("color: #915300; font-size: 10pt; font-weight: 600;")
         control_layout.addWidget(range_warning)
         layout.addWidget(control_card)
 
         metric_title = QLabel("02 / 实时监控")
         metric_title.setObjectName("sectionTitle")
         layout.addWidget(metric_title)
-        metric_grid = QGridLayout()
+        monitor = QHBoxLayout()
         self.metric_labels = {}
-        primary = (
-            ("speed", "实时速度", "m/s", "相邻位置差分"),
-            ("smooth_speed", "平滑速度", "m/s", "0.25 s 指数平滑"),
-            ("average_speed", "3 秒平均速度", "m/s", "3 秒净位移 / 时间"),
-        )
-        for column, (key, title_text, unit, description) in enumerate(primary):
-            metric_grid.addWidget(self.metric_card(key, title_text, unit, description, True), 0, column)
+        gauge_card = QFrame()
+        gauge_card.setObjectName("glassCard")
+        gauge_layout = QVBoxLayout(gauge_card)
+        gauge_title = QLabel("实时速度仪表")
+        gauge_title.setObjectName("sectionTitle")
+        gauge_layout.addWidget(gauge_title, 0, Qt.AlignTop)
+        self.gauge = SpeedGauge()
+        gauge_layout.addWidget(self.gauge, 1)
+        monitor.addWidget(gauge_card, 2)
+        metric_grid = QGridLayout()
         secondary = (
+            ("smooth_speed", "平滑速度", "m/s"),
             ("acceleration", "实时加速度", "m/s²"),
             ("smooth_acceleration", "平滑加速度", "m/s²"),
-            ("average_acceleration", "3 秒平均加速度", "m/s²"),
             ("displacement", "净位移", "m"),
             ("travel", "累计行程", "m"),
         )
-        secondary_grid = QGridLayout()
-        for column, (key, title_text, unit) in enumerate(secondary):
-            secondary_grid.addWidget(self.metric_card(key, title_text, unit, "", False), 0, column)
-        layout.addLayout(metric_grid)
-        layout.addLayout(secondary_grid)
+        for i, (key, title_text, unit) in enumerate(secondary):
+            metric_grid.addWidget(self.metric_card(key, title_text, unit, "", False), i // 3, i % 3)
+        for i, (key, label) in enumerate((("max_speed", "本次最大速度"),
+                                          ("min_speed", "本次最小速度"),
+                                          ("fluctuation", "最近最多 5 秒速度波动"))):
+            card = self.metric_card(key, label, "m/s", "", False)
+            self.metric_labels[key].setWordWrap(True)
+            metric_grid.addWidget(card, 2, i)
+        monitor.addLayout(metric_grid, 5)
+        layout.addLayout(monitor)
         self.values = QLabel("等待采集")
         self.values.setWordWrap(True)
         self.values.setObjectName("muted")
@@ -299,18 +342,27 @@ class EncoderDashboard(QMainWindow):
 
         pg.setConfigOptions(antialias=True, background="#ffffff", foreground="#17324a")
         self.plots = {}
+        self.long_minutes = QSpinBox()
+        self.long_minutes.setRange(1, MAX_CHART_MINUTES)
+        self.long_minutes.setValue(5)
+        self.long_minutes.setSuffix(" 分钟")
+        self.long_source = QComboBox()
+        self.long_source.addItem("实时运行速度", "speed")
+        self.long_source.addItem("5 秒平均速度", "average_speed")
+        self.long_minutes.valueChanged.connect(self.update_long_plot)
+        self.long_source.currentIndexChanged.connect(self.update_long_plot)
         plot_definitions = (
-            ("speed", "03 / 速度趋势", "速度 (m/s)",
+            ("speed", "03 / 速度趋势 · 最近 60 秒", "速度 (m/s)",
              (("speed", "实时速度", "#c06a10"), ("smooth_speed", "平滑速度", "#078461"))),
-            ("average_speed", "04 / 3 秒平均速度", "速度 (m/s)",
-             (("average_speed", "3 秒平均速度", "#1761b0"),)),
-            ("acceleration", "05 / 加速度趋势", "加速度 (m/s²)",
+            ("acceleration", "04 / 加速度趋势 · 最近 60 秒", "加速度 (m/s²)",
              (("acceleration", "实时加速度", "#c06a10"),
-              ("smooth_acceleration", "平滑加速度", "#078461"),
-              ("average_acceleration", "3 秒平均加速度", "#1761b0"))),
+              ("smooth_acceleration", "平滑加速度", "#078461"))),
+            ("custom", "05 / 自定义速度趋势", "速度 (m/s)",
+             (("custom", "所选速度", "#1761b0"),)),
         )
         self.curves = {}
         self.scale_labels = {}
+        charts = QGridLayout()
         for key, title_text, y_label, series in plot_definitions:
             card = QFrame()
             card.setObjectName("glassCard")
@@ -321,39 +373,55 @@ class EncoderDashboard(QMainWindow):
             title.setObjectName("sectionTitle")
             card_heading.addWidget(title)
             card_heading.addStretch()
-            if key in ("speed", "average_speed"):
+            if key in ("speed", "custom"):
                 self.scale_labels[key] = QLabel()
                 self.scale_labels[key].setObjectName("muted")
                 card_heading.addWidget(self.scale_labels[key])
             legend = QLabel("　".join(
                 f'<span style="color:{color};font-weight:bold;">━━</span> {label}'
                 for _, label, color in series))
-            legend.setStyleSheet("color: #435d74; font-size: 12px;")
+            legend.setStyleSheet("color: #435d74; font-size: 10pt;")
             legend.setWordWrap(True)
-            card_heading.addWidget(legend)
             card_layout.addLayout(card_heading)
+            card_layout.addWidget(legend)
+            if key == "custom":
+                options = QHBoxLayout()
+                options.addWidget(QLabel("显示时间"))
+                options.addWidget(self.long_minutes)
+                options.addWidget(QLabel("数据来源"))
+                options.addWidget(self.long_source)
+                options.addStretch()
+                card_layout.addLayout(options)
             plot = pg.PlotWidget()
-            plot.setFixedHeight(245)
+            plot.setMinimumHeight(260)
+            plot.setMaximumHeight(300)
             plot.showGrid(x=True, y=True, alpha=0.18)
             plot.setLabel("left", y_label)
-            plot.setLabel("bottom", "采集时间 (s)")
+            plot.setLabel("bottom", "采集时间 (min)" if key == "custom" else "采集时间 (s)")
             plot.getAxis("left").setWidth(90)
             plot.getAxis("bottom").setHeight(42)
             plot.getAxis("left").enableAutoSIPrefix(False)
             plot.getAxis("bottom").enableAutoSIPrefix(False)
             plot.getAxis("left").setStyle(maxTickLevel=0, autoExpandTextSpace=False)
             plot.getAxis("bottom").setStyle(maxTickLevel=0, hideOverlappingLabels=False)
-            plot.getAxis("bottom").setTickSpacing(levels=[(5.0, 0.0)])
+            if key != "custom":
+                plot.getAxis("bottom").setTickSpacing(levels=[(10.0, 0.0)])
             plot.setMouseEnabled(x=False, y=False)
             plot.hideButtons()
             for name, label, color in series:
-                self.curves[name] = plot.plot(pen=pg.mkPen(color, width=2.5), connect="finite")
+                self.curves[name] = plot.plot(pen=pg.mkPen(color, width=2.5), connect="finite",
+                                              autoDownsample=True, clipToView=True)
             self.plots[key] = plot
-            if key != "speed":
+            if key == "acceleration":
                 plot.setXLink(self.plots["speed"])
             card_layout.addWidget(plot)
-            layout.addWidget(card)
-        self.plots["speed"].setXRange(0, 30, padding=0)
+            if key == "custom":
+                charts.addWidget(card, 1, 0)
+            else:
+                charts.addWidget(card, 0, 0 if key == "speed" else 1)
+        layout.addLayout(charts)
+        self.plots["speed"].setXRange(0, 60, padding=0)
+        self.plots["custom"].setXRange(0, self.long_minutes.value(), padding=0)
         self.update_speed_ranges()
         self.statusBar().showMessage("未连接；请确认 COM 口并选择数据保存目录。")
 
@@ -376,13 +444,14 @@ class EncoderDashboard(QMainWindow):
         return card
 
     def update_speed_ranges(self):
-        if not hasattr(self, "plots") or "average_speed" not in self.plots:
+        if not hasattr(self, "plots") or "custom" not in self.plots:
             return
         bound = 1.2 * self.limit.value()
-        for key in ("speed", "average_speed"):
+        for key in ("speed", "custom"):
             self.plots[key].setYRange(-bound, bound, padding=0)
             self.plots[key].getAxis("left").setTickSpacing(levels=[(bound / 2, 0.0)])
             self.scale_labels[key].setText(f"纵轴 ±{bound:.4f} m/s")
+        self.gauge.set_value(self.gauge.speed, self.limit.value())
 
     def refresh_ports(self):
         current = self.port.currentData()
@@ -406,26 +475,6 @@ class EncoderDashboard(QMainWindow):
             return
         self.confirmed_port = port
         self.port_status.setText(f"已确认：{port}")
-
-    def load_photo(self, path):
-        pixmap = QPixmap(path) if path else QPixmap()
-        if pixmap.isNull():
-            self.photo.setText("照片不可读取\n请重新选择" if path else "尚未选择\n编码器照片")
-            if path:
-                self.statusBar().showMessage("无法读取编码器照片，请重新选择。")
-            return False
-        self.photo.setPixmap(pixmap.scaled(
-            self.photo.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        return True
-
-    def select_photo(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择编码器实物照片", "", "图片 (*.jpg *.jpeg *.png *.bmp)")
-        if path:
-            if self.load_photo(path):
-                self.settings.setValue("encoder_photo", path)
-            else:
-                QMessageBox.warning(self, "无法读取照片", "请选择可读取的图片文件。")
 
     def select_output_directory(self):
         initial = str(self.output_dir) if self.output_dir else str(Path.home())
@@ -490,7 +539,7 @@ class EncoderDashboard(QMainWindow):
         try:
             calculator = MeasurementCalculator(
                 hardware_turns=SimulatorWorker.TURNS if simulation else None,
-                max_speed=self.limit.value()
+                max_speed=self.limit.value(), average_seconds=5.0
             )
             prefix = "simulation" if simulation else "encoder"
             filename = self.output_dir / f"{prefix}_{datetime.now():%Y%m%d_%H%M%S_%f}.csv"
@@ -498,9 +547,10 @@ class EncoderDashboard(QMainWindow):
             try:
                 writer = csv.writer(csv_file)
                 writer.writerow(["elapsed_s", "count", "displacement_m", "travel_m",
-                                 "speed_m_s", "smooth_speed_m_s", "average_speed_3s_m_s",
+                                 "speed_m_s", "smooth_speed_m_s", "average_speed_5s_m_s",
                                  "acceleration_m_s2", "smooth_acceleration_m_s2",
-                                 "average_acceleration_3s_m_s2"])
+                                 "run_min_speed_m_s", "run_min_elapsed_s",
+                                 "run_max_speed_m_s", "run_max_elapsed_s"])
                 csv_file.flush()
             except OSError:
                 csv_file.close()
@@ -509,13 +559,18 @@ class EncoderDashboard(QMainWindow):
             QMessageBox.critical(self, "无法启动", str(exc))
             return
         self.calculator, self.csv_file, self.csv_writer = calculator, csv_file, writer
-        self.history = {name: deque(maxlen=1200)
-                        for name in ("time", *self.curves, "displacement", "travel")}
+        self.stats = SpeedStats()
+        self.history = {name: deque() for name in
+                        ("time", "speed", "smooth_speed", "average_speed",
+                         "acceleration", "smooth_acceleration", "displacement", "travel")}
         for curve in self.curves.values():
             curve.clear()
         for label in self.metric_labels.values():
             label.setText("--")
-        self.plots["speed"].setXRange(0, 30, padding=0)
+        self.gauge.set_value(None, self.limit.value())
+        self.plots["speed"].setXRange(0, 60, padding=0)
+        self.plots["custom"].setXRange(0, self.long_minutes.value(), padding=0)
+        self.last_long_redraw = 0.0
         self.values.setText("正在连接，等待第一个有效位置…")
         self.failure = None
         self.last_sample_time = None
@@ -547,7 +602,14 @@ class EncoderDashboard(QMainWindow):
             return
         try:
             measurement = self.calculator.add(timestamp, count)
-            row = [getattr(measurement, name) for name in measurement.__dataclass_fields__]
+            self.stats.add(measurement.elapsed, measurement.speed)
+            minimum, maximum = self.stats.minimum, self.stats.maximum
+            row = [measurement.elapsed, measurement.count, measurement.displacement,
+                   measurement.travel, measurement.speed, measurement.smooth_speed,
+                   measurement.average_speed, measurement.acceleration,
+                   measurement.smooth_acceleration,
+                   minimum[1] if minimum else None, minimum[0] if minimum else None,
+                   maximum[1] if maximum else None, maximum[0] if maximum else None]
             self.csv_writer.writerow(["" if value is None else value for value in row])
             self.csv_file.flush()
         except (ValueError, OSError, csv.Error) as exc:
@@ -564,6 +626,9 @@ class EncoderDashboard(QMainWindow):
                 continue
             value = getattr(measurement, name)
             self.history[name].append(float("nan") if value is None else value)
+        while self.history["time"] and self.history["time"][0] < measurement.elapsed - MAX_CHART_MINUTES * 60:
+            for samples in self.history.values():
+                samples.popleft()
         self.latest = measurement
 
     def on_error(self, message):
@@ -573,9 +638,11 @@ class EncoderDashboard(QMainWindow):
         self.values.setText(f"数据已失效：{message}")
         for label in self.metric_labels.values():
             label.setText("--")
+        self.gauge.set_value(None, self.limit.value())
 
     def stop(self):
         self.accepting = False
+        self.gauge.set_value(None, self.limit.value())
         if self.worker is not None:
             self.worker.requestInterruption()
             self.connect_button.setEnabled(False)
@@ -609,17 +676,56 @@ class EncoderDashboard(QMainWindow):
             self.values.setText("数据已过期：正在等待编码器响应")
             for label in self.metric_labels.values():
                 label.setText("--")
+            self.gauge.set_value(None, self.limit.value())
             return
         m = self.latest
         self.values.setText("模拟数据，未连接设备" if self.simulation else "正在采集真实编码器数据")
-        for name, label in self.metric_labels.items():
+        self.gauge.set_value(m.speed, self.limit.value())
+        for name in ("smooth_speed", "acceleration", "smooth_acceleration", "displacement", "travel"):
+            label = self.metric_labels[name]
             value = getattr(m, name)
             label.setText("--" if value is None else f"{value:.4f}")
-        x = list(self.history["time"])
-        for name, curve in self.curves.items():
-            curve.setData(x, list(self.history[name]))
-        end = max(30.0, m.elapsed)
-        self.plots["speed"].setXRange(end - 30.0, end, padding=0)
+        for name, extreme in (("min_speed", self.stats.minimum), ("max_speed", self.stats.maximum)):
+            self.metric_labels[name].setText(
+                "--" if extreme is None else f"{extreme[1]:.4f}\n发生于 +{extreme[0]:.1f} s")
+        fluctuation = self.stats.fluctuation()
+        self.metric_labels["fluctuation"].setText(
+            "--" if fluctuation is None else f"{fluctuation[0]:.4f} ~ {fluctuation[1]:.4f}")
+        names = ("time", "speed", "smooth_speed", "acceleration", "smooth_acceleration")
+        recent = []
+        for row in zip(*(reversed(self.history[name]) for name in names)):
+            if row[0] < m.elapsed - 60.0:
+                break
+            recent.append(row)
+        recent.reverse()
+        columns = list(zip(*recent)) if recent else [()] * len(names)
+        for index, name in enumerate(names[1:], 1):
+            self.curves[name].setData(columns[0], columns[index])
+        end = max(60.0, m.elapsed)
+        self.plots["speed"].setXRange(end - 60.0, end, padding=0)
+        if time.monotonic() - self.last_long_redraw >= 1.0:
+            self.update_long_plot()
+
+    def update_long_plot(self, *_):
+        if "custom" not in self.plots:
+            return
+        if not self.history or not self.history["time"]:
+            self.plots["custom"].setXRange(0, self.long_minutes.value(), padding=0)
+            return
+        source = self.long_source.currentData()
+        end = self.history["time"][-1]
+        cutoff = end - self.long_minutes.value() * 60
+        rows = []
+        for timestamp, value in zip(reversed(self.history["time"]), reversed(self.history[source])):
+            if timestamp < cutoff:
+                break
+            rows.append((timestamp / 60, value))
+        rows.reverse()
+        x, y = zip(*rows) if rows else ((), ())
+        self.curves["custom"].setData(x, y)
+        end_minutes = max(float(self.long_minutes.value()), end / 60)
+        self.plots["custom"].setXRange(end_minutes - self.long_minutes.value(), end_minutes, padding=0)
+        self.last_long_redraw = time.monotonic()
 
     def closeEvent(self, event):
         if self.worker is not None:
@@ -633,6 +739,8 @@ class EncoderDashboard(QMainWindow):
 
 
 if __name__ == "__main__":
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     window = EncoderDashboard()
     window.show()

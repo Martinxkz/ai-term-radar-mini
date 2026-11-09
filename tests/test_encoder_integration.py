@@ -78,7 +78,7 @@ class DashboardIntegrationTests(unittest.TestCase):
     def test_acquisition_csv_and_restart_reset(self):
         self.window.start()
         self.wait_for(lambda: hasattr(self.window, "latest")
-                      and self.window.latest.average_acceleration is not None)
+                      and self.window.latest.average_speed is not None, timeout=8)
         self.assertEqual(self.requests[0], position_request(1))
         self.assertIsNotNone(self.window.latest.average_speed)
         self.assertGreater(self.window.latest.displacement, 0)
@@ -91,12 +91,22 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertGreater(len(rows), 3)
         self.assertEqual(rows[0]["displacement_m"], "0.0")
         self.assertEqual(rows[0]["speed_m_s"], "")
-        self.assertNotEqual(rows[-1]["average_speed_3s_m_s"], "")
+        self.assertNotEqual(rows[-1]["average_speed_5s_m_s"], "")
+        self.assertNotEqual(rows[-1]["run_max_elapsed_s"], "")
+        self.assertNotIn("average_speed_3s_m_s", rows[-1])
+        samples = [row for row in rows if row["speed_m_s"]]
+        minimum = min(samples, key=lambda row: float(row["speed_m_s"]))
+        maximum = max(samples, key=lambda row: float(row["speed_m_s"]))
+        self.assertEqual(float(rows[-1]["run_min_speed_m_s"]), float(minimum["speed_m_s"]))
+        self.assertEqual(float(rows[-1]["run_min_elapsed_s"]), float(minimum["elapsed_s"]))
+        self.assertEqual(float(rows[-1]["run_max_speed_m_s"]), float(maximum["speed_m_s"]))
+        self.assertEqual(float(rows[-1]["run_max_elapsed_s"]), float(maximum["elapsed_s"]))
 
         self.window.start()
         self.wait_for(lambda: len(self.window.history["time"]) >= 2)
         self.assertEqual(self.window.history["displacement"][0], 0)
         self.assertLess(self.window.history["time"][0], 0.001)
+        self.assertLess(self.window.stats.maximum[0], 1)
         self.window.stop()
         self.wait_for(lambda: self.window.worker is None)
         self.assertEqual(len(list(Path(".").glob("encoder_*.csv"))), 2)
@@ -159,11 +169,9 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: self.window.worker is None)
         self.assertTrue(list(Path(".").glob("simulation_*.csv")))
 
-    def test_photo_can_be_loaded(self):
-        from encoder_dashboard import resource_path
-        self.assertTrue(self.window.load_photo(str(resource_path("web/comau-logo.png"))))
-        self.assertFalse(self.window.photo.pixmap().isNull())
-        self.assertFalse(self.window.load_photo("missing-photo.jpg"))
+    def test_photo_selection_removed(self):
+        self.assertFalse(hasattr(self.window, "photo_button"))
+        self.assertFalse(hasattr(self.window, "load_photo"))
 
     def test_simulation_stops_promptly_with_long_interval(self):
         self.window.interval.setValue(5000)
@@ -207,29 +215,83 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.app.processEvents()
         self.window.limit.setValue(2.5)
         self.app.processEvents()
-        self.assertEqual(set(self.window.plots), {"speed", "average_speed", "acceleration"})
-        self.assertIn("average_speed", self.window.curves)
+        self.assertEqual(set(self.window.plots), {"speed", "custom", "acceleration"})
+        self.assertIn("custom", self.window.curves)
         self.assertNotIn("displacement", self.window.curves)
-        for key in ("speed", "average_speed"):
+        for key in ("speed", "custom"):
             self.assertAlmostEqual(self.window.plots[key].viewRange()[1][0], -3.0)
             self.assertAlmostEqual(self.window.plots[key].viewRange()[1][1], 3.0)
             self.assertEqual(self.window.scale_labels[key].text(), "纵轴 ±3.0000 m/s")
         self.window.plots["speed"].setXRange(10, 40, padding=0)
         self.app.processEvents()
-        for key in ("average_speed", "acceleration"):
-            self.assertEqual(self.window.plots[key].viewRange()[0], [10, 40])
-            self.assertEqual(self.window.plots[key].getAxis("left").width(), 90)
-            actual = self.window.plots[key].getPlotItem().getViewBox().sceneBoundingRect()
-            reference = self.window.plots["speed"].getPlotItem().getViewBox().sceneBoundingRect()
-            self.assertAlmostEqual(actual.left(), reference.left(), places=1)
-            self.assertAlmostEqual(actual.right(), reference.right(), places=1)
+        self.assertEqual(self.window.plots["acceleration"].viewRange()[0], [10, 40])
+        self.assertEqual(self.window.plots["acceleration"].getAxis("left").width(), 90)
         from PyQt5.QtWidgets import QLabel
         texts = [label.text() for label in self.window.findChildren(QLabel)]
-        for label in ("实时速度", "平滑速度", "3 秒平均速度", "实时加速度", "平滑加速度"):
+        for label in ("实时速度", "平滑速度", "实时加速度", "平滑加速度", "最近最多 5 秒速度波动"):
             self.assertTrue(any(label in text for text in texts), label)
+        self.assertFalse(any("3 秒" in text for text in texts))
         self.assertIn("BA ENG INTERNAL USE ONLY", texts)
-        self.assertEqual(self.window.curves["average_speed"].opts["pen"].color().name(), "#1761b0")
+        self.assertEqual(self.window.curves["custom"].opts["pen"].color().name(), "#1761b0")
         self.assertFalse(hasattr(self.window, "turns"))
+
+    def test_long_chart_sources_and_windows(self):
+        from collections import deque
+        self.window.history = {
+            "time": deque([0., 4., 5., 61., 120.]),
+            "speed": deque([float("nan"), 1., 2., 3., 4.]),
+            "average_speed": deque([float("nan"), float("nan"), 1.5, 2.5, 3.5]),
+        }
+        self.window.long_minutes.setValue(1)
+        self.window.update_long_plot()
+        x, y = self.window.curves["custom"].getData()
+        self.assertEqual(list(y), [3., 4.])
+        self.assertAlmostEqual(x[0], 61 / 60)
+        self.assertEqual(self.window.plots["custom"].viewRange()[0], [1, 2])
+        self.window.long_minutes.setValue(2)
+        self.window.long_source.setCurrentIndex(1)
+        x, y = self.window.curves["custom"].getData()
+        self.assertEqual(list(y[2:]), [1.5, 2.5, 3.5])
+        self.assertEqual(self.window.plots["custom"].viewRange()[0], [0, 2])
+        self.assertEqual(self.window.long_minutes.maximum(), 60)
+
+    def test_stale_data_clears_gauge(self):
+        self.window.start_simulation(0.6, 0.3)
+        self.wait_for(lambda: len(self.window.history["time"]) > 2)
+        self.window.update_display()
+        self.assertIsNotNone(self.window.gauge.speed)
+        self.window.last_sample_time = time.monotonic() - 10
+        self.window.update_display()
+        self.assertIsNone(self.window.gauge.speed)
+        self.assertIn("过期", self.window.values.text())
+
+    def test_graph_history_retention_and_recent_window(self):
+        import io
+        from collections import deque
+        from encoder_core import MeasurementCalculator
+        from encoder_stats import SpeedStats
+
+        self.window.history = {name: deque() for name in
+                               ("time", "speed", "smooth_speed", "average_speed",
+                                "acceleration", "smooth_acceleration", "displacement", "travel")}
+        self.window.calculator = MeasurementCalculator(average_seconds=5)
+        self.window.csv_file = io.StringIO()
+        self.window.csv_writer = csv.writer(self.window.csv_file)
+        self.window.stats = SpeedStats()
+        self.window.accepting = True
+        self.window.last_sample_time = 1
+        now = time.monotonic()
+        for elapsed in (0, 1, 3599, 3600, 3601):
+            self.window.on_sample(now + elapsed, 0)
+        self.assertEqual(list(self.window.history["time"]), [1, 3599, 3600, 3601])
+        self.window.last_sample_time = time.monotonic()
+        self.window.update_display()
+        self.assertEqual(self.window.plots["speed"].viewRange()[0], [3541, 3601])
+        self.assertEqual(self.window.plots["acceleration"].viewRange()[0], [3541, 3601])
+        x, _ = self.window.curves["speed"].getData()
+        self.assertEqual(list(x), [3599, 3600, 3601])
+        self.window.csv_file.close()
+        self.window.csv_file = None
 
 
 if __name__ == "__main__":
