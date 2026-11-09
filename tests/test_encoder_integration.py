@@ -36,6 +36,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.simulator = threading.Thread(target=self.respond, daemon=True)
         self.simulator.start()
         self.window = EncoderDashboard()
+        self.window.output_dir = Path(self.directory.name)
         self.window.port.addItem(os.ttyname(self.slave), os.ttyname(self.slave))
         self.window.port.setCurrentIndex(self.window.port.count() - 1)
         self.window.confirm_selected_port()
@@ -170,6 +171,65 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: len(self.window.history["time"]) > 0)
         self.window.stop()
         self.wait_for(lambda: self.window.worker is None, timeout=1)
+
+    def test_select_directory_is_required_and_records_there(self):
+        self.window.output_dir = None
+        with patch("encoder_dashboard.QMessageBox.warning") as warning:
+            self.window.start()
+        warning.assert_called_once()
+        self.assertIsNone(self.window.worker)
+        with patch("encoder_dashboard.QFileDialog.getExistingDirectory",
+                   return_value=self.directory.name):
+            self.window.select_output_directory()
+        self.assertEqual(self.window.output_dir, Path(self.directory.name))
+        self.window.start()
+        self.wait_for(lambda: len(self.window.history["time"]) > 1)
+        self.window.stop()
+        self.wait_for(lambda: self.window.worker is None)
+        self.assertTrue(list(Path(self.directory.name).glob("encoder_*.csv")))
+
+    def test_removed_directory_blocks_start(self):
+        self.window.output_dir = Path(self.directory.name) / "missing"
+        with patch("encoder_dashboard.QMessageBox.warning") as warning:
+            self.window.start()
+        warning.assert_called_once()
+        self.assertIsNone(self.window.worker)
+
+    def test_cancelled_directory_selection_preserves_selection(self):
+        original = self.window.output_dir
+        with patch("encoder_dashboard.QFileDialog.getExistingDirectory", return_value=""):
+            self.window.select_output_directory()
+        self.assertEqual(self.window.output_dir, original)
+
+    def test_speed_ranges_legends_and_aligned_time_axes(self):
+        self.window.resize(1200, 900)
+        self.window.show()
+        self.app.processEvents()
+        self.window.limit.setValue(2.5)
+        self.app.processEvents()
+        self.assertEqual(set(self.window.plots), {"speed", "average_speed", "acceleration"})
+        self.assertIn("average_speed", self.window.curves)
+        self.assertNotIn("displacement", self.window.curves)
+        for key in ("speed", "average_speed"):
+            self.assertAlmostEqual(self.window.plots[key].viewRange()[1][0], -3.0)
+            self.assertAlmostEqual(self.window.plots[key].viewRange()[1][1], 3.0)
+            self.assertEqual(self.window.scale_labels[key].text(), "纵轴 ±3.0000 m/s")
+        self.window.plots["speed"].setXRange(10, 40, padding=0)
+        self.app.processEvents()
+        for key in ("average_speed", "acceleration"):
+            self.assertEqual(self.window.plots[key].viewRange()[0], [10, 40])
+            self.assertEqual(self.window.plots[key].getAxis("left").width(), 90)
+            actual = self.window.plots[key].getPlotItem().getViewBox().sceneBoundingRect()
+            reference = self.window.plots["speed"].getPlotItem().getViewBox().sceneBoundingRect()
+            self.assertAlmostEqual(actual.left(), reference.left(), places=1)
+            self.assertAlmostEqual(actual.right(), reference.right(), places=1)
+        from PyQt5.QtWidgets import QLabel
+        texts = [label.text() for label in self.window.findChildren(QLabel)]
+        for label in ("实时速度", "平滑速度", "3 秒平均速度", "实时加速度", "平滑加速度"):
+            self.assertTrue(any(label in text for text in texts), label)
+        self.assertIn("BA ENG INTERNAL USE ONLY", texts)
+        self.assertEqual(self.window.curves["average_speed"].opts["pen"].color().name(), "#1761b0")
+        self.assertFalse(hasattr(self.window, "turns"))
 
 
 if __name__ == "__main__":

@@ -11,11 +11,11 @@ import pyqtgraph as pg
 import serial
 import serial.tools.list_ports
 from PyQt5.QtCore import QSettings, QThread, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from encoder_core import (MeasurementCalculator, RESOLUTION, WHEEL_CIRCUMFERENCE_M,
@@ -108,6 +108,7 @@ class EncoderDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RS485 编码器板链监控")
+        self.setWindowIcon(QIcon(str(resource_path("web/comau-logo.png"))))
         self.resize(1250, 900)
         self.worker = self.calculator = self.csv_file = self.csv_writer = None
         self.accepting = False
@@ -117,8 +118,7 @@ class EncoderDashboard(QMainWindow):
         self.confirmed_port = None
         self.simulation = False
         self.settings = QSettings("BA ENG", "Encoder Monitor")
-        self.output_dir = (Path.home() / "Documents" / "EncoderMonitor"
-                           if getattr(sys, "frozen", False) else Path.cwd())
+        self.output_dir = None
         self.init_ui()
         self.refresh_ports()
         self.display_timer = QTimer(self)
@@ -126,23 +126,74 @@ class EncoderDashboard(QMainWindow):
         self.display_timer.start(100)
 
     def init_ui(self):
+        self.setStyleSheet("""
+            QMainWindow, QScrollArea { background: #eaf1f8; }
+            QScrollArea { border: none; }
+            QWidget { color: #17314b; font-family: "Microsoft YaHei", "Segoe UI"; font-size: 13px; }
+            QWidget#dashboardCanvas { background: #eaf1f8; }
+            QFrame#glassCard {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(255,255,255,250), stop:1 rgba(244,249,255,245));
+                border: 1px solid #d5e4f0; border-radius: 14px;
+            }
+            QLabel#eyebrow { color: #637f99; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+            QLabel#sectionTitle { color: #1b3853; font-size: 16px; font-weight: 700; }
+            QLabel#metricValue { color: #103f6a; font-size: 30px; font-weight: 700; }
+            QLabel#detailValue { color: #183c5b; font-size: 17px; font-weight: 700; }
+            QLabel#muted { color: #61798e; font-size: 11px; }
+            QPushButton { background: #f3f8fc; border: 1px solid #c9dbe9;
+                border-radius: 7px; padding: 7px 12px; color: #244b6b; }
+            QPushButton:hover { background: #e3f0fa; }
+            QPushButton:disabled { color: #9cabb8; background: #edf1f4; }
+            QPushButton#primary { background: #105393; color: white; border: 1px solid #105393; font-weight: 700; }
+            QPushButton#primary:hover { background: #1b6aac; }
+            QPushButton#primary:disabled { background: #a7b9c9; border-color: #a7b9c9; }
+            QComboBox, QSpinBox, QDoubleSpinBox { background: white; border: 1px solid #c9dbe9;
+                border-radius: 6px; padding: 5px; min-height: 22px; }
+        """)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.setCentralWidget(scroll)
         central = QWidget()
-        self.setCentralWidget(central)
+        central.setObjectName("dashboardCanvas")
+        scroll.setWidget(central)
         layout = QVBoxLayout(central)
-        notice = QLabel("BA ENG Internal use only")
-        notice.setStyleSheet("color: #c62828; font-weight: bold;")
+        layout.setContentsMargins(26, 20, 26, 24)
+        layout.setSpacing(14)
+        notice = QLabel("BA ENG INTERNAL USE ONLY")
+        notice.setObjectName("internalNotice")
+        notice.setStyleSheet("color: #b91c1c; font-size: 16px; font-weight: 900;")
         layout.addWidget(notice)
         heading = QHBoxLayout()
         logo = QLabel()
         logo.setPixmap(QPixmap(str(resource_path("web/comau-logo.png"))).scaled(
-            85, 85, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         heading.addWidget(logo)
-        heading.addWidget(QLabel("板链运行监控  |  作者：YD"), 1)
+        heading_text = QVBoxLayout()
+        eyebrow = QLabel("MOTION MONITOR / ENCODER")
+        eyebrow.setObjectName("eyebrow")
+        title = QLabel("板链运行监控")
+        title.setStyleSheet("font-size: 27px; font-weight: 800; color: #153956;")
+        subtitle = QLabel("RS485 · 200 mm 计米轮    /    作者 YD")
+        subtitle.setObjectName("muted")
+        heading_text.addWidget(eyebrow)
+        heading_text.addWidget(title)
+        heading_text.addWidget(subtitle)
+        heading.addLayout(heading_text, 1)
         self.mode_label = QLabel("真实编码器 · 未连接")
-        self.mode_label.setStyleSheet("font-weight: bold; color: #174e80;")
+        self.mode_label.setStyleSheet("font-weight: bold; color: #174e80; padding: 8px;")
         heading.addWidget(self.mode_label)
         layout.addLayout(heading)
+
+        control_card = QFrame()
+        control_card.setObjectName("glassCard")
+        control_layout = QVBoxLayout(control_card)
+        control_layout.setContentsMargins(20, 17, 20, 17)
+        control_title = QLabel("01 / 采集设置")
+        control_title.setObjectName("sectionTitle")
+        control_layout.addWidget(control_title)
         controls = QHBoxLayout()
+        controls.setSpacing(18)
         self.port = QComboBox()
         self.port.currentIndexChanged.connect(self.invalidate_port)
         self.refresh = QPushButton("刷新端口")
@@ -159,72 +210,179 @@ class EncoderDashboard(QMainWindow):
         self.interval.setRange(25, 5000)
         self.interval.setValue(50)
         self.interval.setSuffix(" ms")
-        self.turns = QSpinBox()
-        self.turns.setRange(0, 32768)
-        self.turns.setSpecialValueText("未知（不自动回绕）")
-        self.turns.setToolTip("仅填写厂家确认的硬件总圈数；未知时保持 0。")
         self.limit = QDoubleSpinBox()
         self.limit.setRange(0.001, 1000)
         self.limit.setDecimals(3)
         self.limit.setValue(5.0)
         self.limit.setSuffix(" m/s")
         self.limit.setToolTip("超过此绝对速度时停止采集，防止回绕或复位产生错误数据；不是安全保护。")
-        form = QFormLayout()
-        for label, widget in (("端口", self.port), ("波特率", self.baud),
-                              ("站号", self.address), ("轮询周期", self.interval),
-                              ("硬件总圈数", self.turns), ("合理速度上限", self.limit)):
-            form.addRow(label, widget)
-        controls.addLayout(form)
-        buttons = QVBoxLayout()
-        buttons.addWidget(self.refresh)
-        buttons.addWidget(self.confirm_port)
-        buttons.addWidget(self.port_status)
+        self.limit.valueChanged.connect(self.update_speed_ranges)
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        for index, (label, widget) in enumerate((
+                ("端口", self.port), ("波特率", self.baud), ("站号", self.address),
+                ("轮询周期", self.interval), ("合理速度上限", self.limit))):
+            row, column = divmod(index, 3)
+            form.addWidget(QLabel(label), row * 2, column)
+            form.addWidget(widget, row * 2 + 1, column)
+            form.setColumnStretch(column, 1)
+        controls.addLayout(form, 3)
+        buttons = QGridLayout()
+        buttons.addWidget(self.refresh, 0, 0)
+        buttons.addWidget(self.confirm_port, 0, 1)
+        buttons.addWidget(self.port_status, 1, 0)
         self.connect_button = QPushButton("连接并开始采集")
+        self.connect_button.setObjectName("primary")
         self.connect_button.clicked.connect(self.toggle)
-        buttons.addWidget(self.connect_button)
+        buttons.addWidget(self.connect_button, 1, 1)
         self.simulation_button = QPushButton("模拟输入设置…")
         self.simulation_button.clicked.connect(self.show_simulation_dialog)
-        buttons.addWidget(self.simulation_button)
+        buttons.addWidget(self.simulation_button, 2, 0)
         self.photo_button = QPushButton("选择编码器照片…")
         self.photo_button.clicked.connect(self.select_photo)
-        buttons.addWidget(self.photo_button)
-        buttons.addStretch()
-        controls.addLayout(buttons)
+        buttons.addWidget(self.photo_button, 2, 1)
+        controls.addLayout(buttons, 2)
+        photo_layout = QVBoxLayout()
         self.photo = QLabel()
         self.photo.setAlignment(Qt.AlignCenter)
-        self.photo.setFixedSize(130, 180)
+        self.photo.setFixedSize(90, 105)
         self.photo.setWordWrap(True)
-        controls.addWidget(self.photo)
+        photo_layout.addWidget(self.photo)
+        photo_layout.addStretch()
+        controls.addLayout(photo_layout)
         self.load_photo(self.settings.value("encoder_photo", "", type=str))
+        control_layout.addLayout(controls)
+        storage = QHBoxLayout()
+        self.output_label = QLabel("未选择数据保存目录")
+        self.output_label.setWordWrap(True)
+        self.output_label.setObjectName("muted")
+        self.output_button = QPushButton("选择保存目录…")
+        self.output_button.clicked.connect(self.select_output_directory)
+        storage.addWidget(self.output_button)
+        storage.addWidget(self.output_label, 1)
+        control_layout.addLayout(storage)
+        range_warning = QLabel("真实编码器计数存在量程；连续运转跨越边界可能产生错误，请核实设备量程。")
+        range_warning.setWordWrap(True)
+        range_warning.setStyleSheet("color: #915300; font-size: 11px; font-weight: 600;")
+        control_layout.addWidget(range_warning)
+        layout.addWidget(control_card)
+
+        metric_title = QLabel("02 / 实时监控")
+        metric_title.setObjectName("sectionTitle")
+        layout.addWidget(metric_title)
+        metric_grid = QGridLayout()
+        self.metric_labels = {}
+        primary = (
+            ("speed", "实时速度", "m/s", "相邻位置差分"),
+            ("smooth_speed", "平滑速度", "m/s", "0.25 s 指数平滑"),
+            ("average_speed", "3 秒平均速度", "m/s", "3 秒净位移 / 时间"),
+        )
+        for column, (key, title_text, unit, description) in enumerate(primary):
+            metric_grid.addWidget(self.metric_card(key, title_text, unit, description, True), 0, column)
+        secondary = (
+            ("acceleration", "实时加速度", "m/s²"),
+            ("smooth_acceleration", "平滑加速度", "m/s²"),
+            ("average_acceleration", "3 秒平均加速度", "m/s²"),
+            ("displacement", "净位移", "m"),
+            ("travel", "累计行程", "m"),
+        )
+        secondary_grid = QGridLayout()
+        for column, (key, title_text, unit) in enumerate(secondary):
+            secondary_grid.addWidget(self.metric_card(key, title_text, unit, "", False), 0, column)
+        layout.addLayout(metric_grid)
+        layout.addLayout(secondary_grid)
         self.values = QLabel("等待采集")
         self.values.setWordWrap(True)
-        self.values.setStyleSheet("font-size: 15px;")
-        controls.addWidget(self.values, 1)
-        layout.addLayout(controls)
+        self.values.setObjectName("muted")
+        layout.addWidget(self.values)
 
         pg.setConfigOptions(antialias=True, background="#ffffff", foreground="#17324a")
         self.plots = {}
         plot_definitions = (
-            ("speed", "速度 (m/s)", (("speed", "实时速度", "#b86b0a"),
-                                      ("smooth_speed", "平滑速度", "#078461"),
-                                      ("average_speed", "3 秒平均速度", "#1761b0"))),
-            ("acceleration", "加速度 (m/s²)", (("acceleration", "实时加速度", "#b86b0a"),
-                                               ("smooth_acceleration", "平滑速度加速度", "#078461"),
-                                               ("average_acceleration", "3 秒平均加速度", "#1761b0"))),
-            ("distance", "距离 (m)", (("displacement", "净位移", "#1761b0"),
-                                      ("travel", "累计行程", "#b86b0a"))),
+            ("speed", "03 / 速度趋势", "速度 (m/s)",
+             (("speed", "实时速度", "#c06a10"), ("smooth_speed", "平滑速度", "#078461"))),
+            ("average_speed", "04 / 3 秒平均速度", "速度 (m/s)",
+             (("average_speed", "3 秒平均速度", "#1761b0"),)),
+            ("acceleration", "05 / 加速度趋势", "加速度 (m/s²)",
+             (("acceleration", "实时加速度", "#c06a10"),
+              ("smooth_acceleration", "平滑加速度", "#078461"),
+              ("average_acceleration", "3 秒平均加速度", "#1761b0"))),
         )
         self.curves = {}
-        for key, title, series in plot_definitions:
-            plot = pg.PlotWidget(title=title)
-            plot.showGrid(x=True, y=True, alpha=0.3)
-            plot.setLabel("bottom", "采集时间", units="s")
-            plot.addLegend()
+        self.scale_labels = {}
+        for key, title_text, y_label, series in plot_definitions:
+            card = QFrame()
+            card.setObjectName("glassCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(18, 14, 18, 14)
+            card_heading = QHBoxLayout()
+            title = QLabel(title_text)
+            title.setObjectName("sectionTitle")
+            card_heading.addWidget(title)
+            card_heading.addStretch()
+            if key in ("speed", "average_speed"):
+                self.scale_labels[key] = QLabel()
+                self.scale_labels[key].setObjectName("muted")
+                card_heading.addWidget(self.scale_labels[key])
+            legend = QLabel("　".join(
+                f'<span style="color:{color};font-weight:bold;">━━</span> {label}'
+                for _, label, color in series))
+            legend.setStyleSheet("color: #435d74; font-size: 12px;")
+            legend.setWordWrap(True)
+            card_heading.addWidget(legend)
+            card_layout.addLayout(card_heading)
+            plot = pg.PlotWidget()
+            plot.setFixedHeight(245)
+            plot.showGrid(x=True, y=True, alpha=0.18)
+            plot.setLabel("left", y_label)
+            plot.setLabel("bottom", "采集时间 (s)")
+            plot.getAxis("left").setWidth(90)
+            plot.getAxis("bottom").setHeight(42)
+            plot.getAxis("left").enableAutoSIPrefix(False)
+            plot.getAxis("bottom").enableAutoSIPrefix(False)
+            plot.getAxis("left").setStyle(maxTickLevel=0, autoExpandTextSpace=False)
+            plot.getAxis("bottom").setStyle(maxTickLevel=0, hideOverlappingLabels=False)
+            plot.getAxis("bottom").setTickSpacing(levels=[(5.0, 0.0)])
+            plot.setMouseEnabled(x=False, y=False)
+            plot.hideButtons()
             for name, label, color in series:
-                self.curves[name] = plot.plot(name=label, pen=pg.mkPen(color, width=2))
+                self.curves[name] = plot.plot(pen=pg.mkPen(color, width=2.5), connect="finite")
             self.plots[key] = plot
-            layout.addWidget(plot)
-        self.statusBar().showMessage("未连接。硬件圈数未知时不会自动处理回绕。")
+            if key != "speed":
+                plot.setXLink(self.plots["speed"])
+            card_layout.addWidget(plot)
+            layout.addWidget(card)
+        self.plots["speed"].setXRange(0, 30, padding=0)
+        self.update_speed_ranges()
+        self.statusBar().showMessage("未连接；请确认 COM 口并选择数据保存目录。")
+
+    def metric_card(self, key, title, unit, description, primary):
+        card = QFrame()
+        card.setObjectName("glassCard")
+        content = QVBoxLayout(card)
+        content.setContentsMargins(16, 14, 16, 14)
+        heading = QLabel(title)
+        heading.setObjectName("muted")
+        value = QLabel("--")
+        value.setObjectName("metricValue" if primary else "detailValue")
+        value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        unit_label = QLabel(unit + (f"  ·  {description}" if description else ""))
+        unit_label.setObjectName("muted")
+        content.addWidget(heading)
+        content.addWidget(value)
+        content.addWidget(unit_label)
+        self.metric_labels[key] = value
+        return card
+
+    def update_speed_ranges(self):
+        if not hasattr(self, "plots") or "average_speed" not in self.plots:
+            return
+        bound = 1.2 * self.limit.value()
+        for key in ("speed", "average_speed"):
+            self.plots[key].setYRange(-bound, bound, padding=0)
+            self.plots[key].getAxis("left").setTickSpacing(levels=[(bound / 2, 0.0)])
+            self.scale_labels[key].setText(f"纵轴 ±{bound:.4f} m/s")
 
     def refresh_ports(self):
         current = self.port.currentData()
@@ -269,6 +427,14 @@ class EncoderDashboard(QMainWindow):
             else:
                 QMessageBox.warning(self, "无法读取照片", "请选择可读取的图片文件。")
 
+    def select_output_directory(self):
+        initial = str(self.output_dir) if self.output_dir else str(Path.home())
+        path = QFileDialog.getExistingDirectory(self, "选择数据保存目录", initial)
+        if path:
+            self.output_dir = Path(path)
+            self.output_label.setText(str(self.output_dir))
+            self.output_label.setToolTip(str(self.output_dir))
+
     def show_simulation_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("模拟输入设置（不连接设备）")
@@ -295,8 +461,8 @@ class EncoderDashboard(QMainWindow):
 
     def set_controls_enabled(self, enabled):
         for widget in (self.port, self.refresh, self.confirm_port, self.baud,
-                       self.address, self.interval, self.turns, self.limit,
-                       self.simulation_button):
+                       self.address, self.interval, self.limit,
+                       self.simulation_button, self.output_button):
             widget.setEnabled(enabled)
 
     def toggle(self):
@@ -315,12 +481,17 @@ class EncoderDashboard(QMainWindow):
         if simulation and (abs(target) > self.limit.value() or acceleration <= 0):
             QMessageBox.warning(self, "无法启动", "模拟目标速度或加速度超出允许范围。")
             return
+        if self.output_dir is None:
+            QMessageBox.warning(self, "无法启动", "请先选择数据保存目录。")
+            return
+        if not self.output_dir.is_dir():
+            QMessageBox.warning(self, "无法启动", "所选保存目录不存在，请重新选择。")
+            return
         try:
             calculator = MeasurementCalculator(
-                hardware_turns=SimulatorWorker.TURNS if simulation else self.turns.value() or None,
+                hardware_turns=SimulatorWorker.TURNS if simulation else None,
                 max_speed=self.limit.value()
             )
-            self.output_dir.mkdir(parents=True, exist_ok=True)
             prefix = "simulation" if simulation else "encoder"
             filename = self.output_dir / f"{prefix}_{datetime.now():%Y%m%d_%H%M%S_%f}.csv"
             csv_file = filename.open("x", encoding="utf-8-sig", newline="")
@@ -338,9 +509,13 @@ class EncoderDashboard(QMainWindow):
             QMessageBox.critical(self, "无法启动", str(exc))
             return
         self.calculator, self.csv_file, self.csv_writer = calculator, csv_file, writer
-        self.history = {name: deque(maxlen=1200) for name in ("time", *self.curves)}
+        self.history = {name: deque(maxlen=1200)
+                        for name in ("time", *self.curves, "displacement", "travel")}
         for curve in self.curves.values():
             curve.clear()
+        for label in self.metric_labels.values():
+            label.setText("--")
+        self.plots["speed"].setXRange(0, 30, padding=0)
         self.values.setText("正在连接，等待第一个有效位置…")
         self.failure = None
         self.last_sample_time = None
@@ -384,7 +559,9 @@ class EncoderDashboard(QMainWindow):
             self.statusBar().showMessage(f"已收到{kind}；CSV：{self.csv_file.name}")
         self.last_sample_time = timestamp
         self.history["time"].append(measurement.elapsed)
-        for name in self.curves:
+        for name in self.history:
+            if name == "time":
+                continue
             value = getattr(measurement, name)
             self.history[name].append(float("nan") if value is None else value)
         self.latest = measurement
@@ -394,6 +571,8 @@ class EncoderDashboard(QMainWindow):
         self.accepting = False
         self.statusBar().showMessage(f"采集已中断：{message}")
         self.values.setText(f"数据已失效：{message}")
+        for label in self.metric_labels.values():
+            label.setText("--")
 
     def stop(self):
         self.accepting = False
@@ -428,21 +607,19 @@ class EncoderDashboard(QMainWindow):
             return
         if time.monotonic() - self.last_sample_time > max(1.0, self.interval.value() / 1000 * 3):
             self.values.setText("数据已过期：正在等待编码器响应")
+            for label in self.metric_labels.values():
+                label.setText("--")
             return
         m = self.latest
-        def fmt(value, unit):
-            return "等待数据" if value is None else f"{value:.4f} {unit}"
-        self.values.setText(
-            f"实时速度：{fmt(m.speed, 'm/s')}    平滑速度：{fmt(m.smooth_speed, 'm/s')}\n"
-            f"3 秒平均速度：{fmt(m.average_speed, 'm/s')}\n"
-            f"实时加速度：{fmt(m.acceleration, 'm/s²')}    "
-            f"平滑加速度：{fmt(m.smooth_acceleration, 'm/s²')}\n"
-            f"3 秒平均加速度：{fmt(m.average_acceleration, 'm/s²')}\n"
-            f"净位移：{m.displacement:.4f} m    累计行程：{m.travel:.4f} m"
-        )
+        self.values.setText("模拟数据，未连接设备" if self.simulation else "正在采集真实编码器数据")
+        for name, label in self.metric_labels.items():
+            value = getattr(m, name)
+            label.setText("--" if value is None else f"{value:.4f}")
         x = list(self.history["time"])
         for name, curve in self.curves.items():
             curve.setData(x, list(self.history[name]))
+        end = max(30.0, m.elapsed)
+        self.plots["speed"].setXRange(end - 30.0, end, padding=0)
 
     def closeEvent(self, event):
         if self.worker is not None:

@@ -13,6 +13,7 @@ if ($LASTEXITCODE -ne 0) { throw "安装构建依赖失败。" }
 & $python -m unittest discover -s tests -p test_encoder_core.py
 if ($LASTEXITCODE -ne 0) { throw "核心测试失败，停止打包。" }
 & $python -m PyInstaller --noconfirm --clean --onefile --windowed `
-    --name EncoderMonitor --add-data "web/comau-logo.png;web" encoder_dashboard.py
+    --name EncoderMonitor --icon "web/comau-logo.ico" `
+    --add-data "web/comau-logo.png;web" encoder_dashboard.py
 if ($LASTEXITCODE -ne 0) { throw "打包失败。" }
 Write-Host "完成：$PSScriptRoot\dist\EncoderMonitor.exe"
