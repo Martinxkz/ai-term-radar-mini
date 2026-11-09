@@ -3,19 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101921">
+  <meta name="theme-color" content="#edf3f9">
   <title>板链运行监控 · 编码器模拟</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="shell">
+    <p class="internal-notice">BA ENG Internal use only</p>
     <header>
-      <div>
-        <p class="eyebrow">MOTION MONITOR / 演示</p>
-        <h1>板链运行监控</h1>
-        <p class="subtitle">RS485 编码器 · 200 mm 计米轮 · 实时数据面板</p>
+      <div class="brand">
+        <img class="brand-logo" src="comau-logo.png" alt="Comau 标志" width="180" height="180">
+        <div>
+          <p class="eyebrow">MOTION MONITOR / 演示</p>
+          <h1>板链运行监控</h1>
+          <p class="subtitle">RS485 编码器 · 200 mm 计米轮 · 实时数据面板</p>
+        </div>
       </div>
-      <div class="status" id="status"><span class="dot"></span><span id="status-text">模拟运行中</span></div>
+      <div class="header-meta">
+        <div class="status" id="status"><span class="dot"></span><span id="status-text">模拟运行中</span></div>
+        <p class="author">作者 <strong>YD</strong></p>
+      </div>
     </header>
 
     <div class="notice"><strong>模拟信号</strong>　所有数据由浏览器生成，未连接真实编码器，不可用于设备控制或安全判断。</div>

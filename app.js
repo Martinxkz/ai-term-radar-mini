@@ -10,7 +10,7 @@ let recording;
 let running = true;
 let lastTick = performance.now();
 let lastDraw = 0;
-const colors = { raw: "#e9b65a", smooth: "#5ae0a8", average: "#67b9ff" };
+const colors = { raw: "#b86b0a", smooth: "#078461", average: "#1761b0" };
 
 function reset() {
   simulator = new EncoderSimulator();
@@ -93,8 +93,8 @@ function drawChart(canvas, series) {
   const x = t => left + (t - start) / 30 * plotWidth;
   const y = value => top + (high - value) / (high - low) * plotHeight;
   ctx.font = "10px sans-serif";
-  ctx.fillStyle = "#78909b";
-  ctx.strokeStyle = "#273b45";
+  ctx.fillStyle = "#52677b";
+  ctx.strokeStyle = "#dce5ed";
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const py = top + plotHeight * i / 4;
