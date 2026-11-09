@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101921">
+  <title>板链运行监控 · 编码器模拟</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">MOTION MONITOR / 演示</p>
+        <h1>板链运行监控</h1>
+        <p class="subtitle">RS485 编码器 · 200 mm 计米轮 · 实时数据面板</p>
+      </div>
+      <div class="status" id="status"><span class="dot"></span><span id="status-text">模拟运行中</span></div>
+    </header>
+
+    <div class="notice"><strong>模拟信号</strong>　所有数据由浏览器生成，未连接真实编码器，不可用于设备控制或安全判断。</div>
+
+    <main>
+      <section class="controls panel" aria-label="模拟控制">
+        <div class="control-heading">
+          <div><p class="eyebrow">SIMULATION</p><h2>模拟控制</h2></div>
+          <div class="buttons"><button id="pause" class="secondary">暂停</button><button id="reset" class="secondary">重置</button></div>
+        </div>
+        <div class="control-grid">
+          <label for="target">目标速度 <output id="target-value">0.60 m/s</output>
+            <input id="target" type="range" min="-1.5" max="1.5" step="0.05" value="0.6">
+            <span class="range-ends"><span>反向 -1.50</span><span>0</span><span>正向 +1.50</span></span>
+          </label>
+          <label for="ramp">加速度限制 <output id="ramp-value">0.30 m/s²</output>
+            <input id="ramp" type="range" min="0.05" max="1.5" step="0.05" value="0.3">
+            <span class="range-ends"><span>缓慢</span><span>快速</span></span>
+          </label>
+          <div class="signal-info"><span>模拟编码器</span><strong>131,072 <small>counts/rev</small></strong><span>轮询周期约 50 ms · 带方向</span></div>
+        </div>
+      </section>
+
+      <section class="metric-grid" aria-label="实时测量">
+        <article class="metric panel"><div class="metric-label">实时速度 <span class="mini-dot yellow"></span></div><div class="metric-value" id="speed">--</div><div class="metric-unit">m/s <span>相邻位置差分</span></div></article>
+        <article class="metric panel"><div class="metric-label">平滑速度 <span class="mini-dot green"></span></div><div class="metric-value" id="smooth-speed">--</div><div class="metric-unit">m/s <span>指数平滑 · 0.25 s</span></div></article>
+        <article class="metric panel"><div class="metric-label">3 秒平均速度 <span class="mini-dot blue"></span></div><div class="metric-value" id="average-speed">--</div><div class="metric-unit">m/s <span>净位移 / 3 s</span></div></article>
+        <article class="metric panel"><div class="metric-label">平滑加速度 <span class="mini-dot green"></span></div><div class="metric-value" id="smooth-acceleration">--</div><div class="metric-unit">m/s² <span>平滑速度变化率</span></div></article>
+      </section>
+
+      <section class="charts">
+        <article class="panel chart-card">
+          <div class="chart-heading"><div><p class="eyebrow">VELOCITY</p><h2>速度趋势 <small>m/s</small></h2></div><div class="legend"><span><i class="yellow"></i>实时</span><span><i class="green"></i>平滑</span><span><i class="blue"></i>3 秒平均</span></div></div>
+          <canvas id="speed-chart" aria-label="实时速度曲线"></canvas>
+        </article>
+        <article class="panel chart-card">
+          <div class="chart-heading"><div><p class="eyebrow">ACCELERATION</p><h2>加速度趋势 <small>m/s²</small></h2></div><div class="legend"><span><i class="yellow"></i>实时</span><span><i class="green"></i>平滑</span><span><i class="blue"></i>3 秒平均</span></div></div>
+          <canvas id="acceleration-chart" aria-label="加速度曲线"></canvas>
+        </article>
+      </section>
+      <section class="details panel" aria-label="其他参数">
+        <div><span>净位移</span><strong id="displacement">0.000 m</strong></div>
+        <div><span>累计行程</span><strong id="travel">0.000 m</strong></div>
+        <div><span>实时加速度</span><strong id="acceleration">-- m/s²</strong></div>
+        <div><span>3 秒平均加速度</span><strong id="average-acceleration">-- m/s²</strong></div>
+        <div><span>编码器计数</span><strong id="count">--</strong></div>
+        <div><span>采集时间</span><strong id="elapsed">0.0 s</strong></div>
+      </section>
+      <p class="footnote">曲线展示最近 30 秒。3 秒平均值需完整窗口；平均速度有方向，正反运动可能相互抵消。硬件量程为模拟值，真实设备须核实。</p>
+    </main>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
