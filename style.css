@@ -46,6 +46,7 @@ input[type=range] { width: 100%; accent-color: #54d6a0; margin: 16px 0 6px; curs
 .metric-unit { color: #8ba1ac; font-size: 12px; }
 .metric-unit span { float: right; color: #647d89; font-size: 10px; margin-top: 2px; }
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+.distance-chart { grid-column: 1 / -1; }
 .chart-card { padding: 22px; min-width: 0; }
 .legend { display: flex; flex-wrap: wrap; justify-content: end; gap: 12px; color: #9cb0ba; font-size: 10px; }
 .legend span { white-space: nowrap; }
@@ -68,6 +69,9 @@ canvas { width: 100%; height: 230px; display: block; margin-top: 18px; }
   header { align-items: flex-start; }
   .status { padding: 7px 9px; font-size: 10px; }
   .control-grid { grid-template-columns: 1fr; gap: 22px; }
+  .control-heading { align-items: flex-start; }
+  .buttons { flex-wrap: wrap; justify-content: flex-end; }
+  .secondary { padding: 8px 10px; }
   .signal-info { border-left: 0; border-top: 1px solid #2b3f48; padding: 16px 0 0; }
   .metric { padding: 16px; }
   .metric-unit span { float: none; display: block; margin-top: 5px; }

@@ -6,6 +6,7 @@ const ramp = $("ramp");
 const pauseButton = $("pause");
 let simulator;
 let history;
+let recording;
 let running = true;
 let lastTick = performance.now();
 let lastDraw = 0;
@@ -16,6 +17,7 @@ function reset() {
   simulator.targetSpeed = Number(target.value);
   simulator.accelerationLimit = Number(ramp.value);
   history = [simulator.current];
+  recording = [simulator.current];
   lastTick = performance.now();
   running = true;
   pauseButton.textContent = "暂停";
@@ -37,6 +39,25 @@ function updateControls() {
 target.addEventListener("input", updateControls);
 ramp.addEventListener("input", updateControls);
 $("reset").addEventListener("click", reset);
+$("export").addEventListener("click", () => {
+  const columns = [
+    ["elapsed_s", "elapsed"], ["count", "count"], ["displacement_m", "displacement"],
+    ["travel_m", "travel"], ["speed_m_s", "speed"], ["smooth_speed_m_s", "smoothSpeed"],
+    ["average_speed_3s_m_s", "averageSpeed"], ["acceleration_m_s2", "acceleration"],
+    ["smooth_acceleration_m_s2", "smoothAcceleration"],
+    ["average_acceleration_3s_m_s2", "averageAcceleration"],
+  ];
+  const lines = [columns.map(([label]) => label).join(",")];
+  for (const point of recording) {
+    lines.push(columns.map(([, key]) => point[key] ?? "").join(","));
+  }
+  const url = URL.createObjectURL(new Blob([lines.join("\r\n") + "\r\n"], { type: "text/csv" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `encoder_simulation_${new Date().toISOString().replaceAll(":", "-")}.csv`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 pauseButton.addEventListener("click", () => {
   running = !running;
   lastTick = performance.now();
@@ -116,6 +137,7 @@ function render() {
   $("elapsed").textContent = `${m.elapsed.toFixed(1)} s`;
   drawChart($("speed-chart"), [["speed", colors.raw], ["smoothSpeed", colors.smooth], ["averageSpeed", colors.average]]);
   drawChart($("acceleration-chart"), [["acceleration", colors.raw], ["smoothAcceleration", colors.smooth], ["averageAcceleration", colors.average]]);
+  drawChart($("distance-chart"), [["displacement", colors.average], ["travel", colors.raw]]);
 }
 
 function tick() {
@@ -125,7 +147,10 @@ function tick() {
   lastTick = now;
   if (dt <= 0) return;
   try {
-    history.push(simulator.advance(dt));
+    const point = simulator.advance(dt);
+    history.push(point);
+    recording.push(point);
+    if (recording.length > 72000) recording.shift();
     while (history.length > 1 && history[1].elapsed < simulator.current.elapsed - 30) history.shift();
     if (now - lastDraw >= 150) { render(); lastDraw = now; }
   } catch (error) {

@@ -24,7 +24,7 @@
       <section class="controls panel" aria-label="模拟控制">
         <div class="control-heading">
           <div><p class="eyebrow">SIMULATION</p><h2>模拟控制</h2></div>
-          <div class="buttons"><button id="pause" class="secondary">暂停</button><button id="reset" class="secondary">重置</button></div>
+          <div class="buttons"><button id="pause" class="secondary">暂停</button><button id="reset" class="secondary">重置</button><button id="export" class="secondary">下载 CSV</button></div>
         </div>
         <div class="control-grid">
           <label for="target">目标速度 <output id="target-value">0.60 m/s</output>
@@ -55,6 +55,10 @@
           <div class="chart-heading"><div><p class="eyebrow">ACCELERATION</p><h2>加速度趋势 <small>m/s²</small></h2></div><div class="legend"><span><i class="yellow"></i>实时</span><span><i class="green"></i>平滑</span><span><i class="blue"></i>3 秒平均</span></div></div>
           <canvas id="acceleration-chart" aria-label="加速度曲线"></canvas>
         </article>
+        <article class="panel chart-card distance-chart">
+          <div class="chart-heading"><div><p class="eyebrow">DISTANCE</p><h2>距离趋势 <small>m</small></h2></div><div class="legend"><span><i class="blue"></i>净位移</span><span><i class="yellow"></i>累计行程</span></div></div>
+          <canvas id="distance-chart" aria-label="距离曲线"></canvas>
+        </article>
       </section>
       <section class="details panel" aria-label="其他参数">
         <div><span>净位移</span><strong id="displacement">0.000 m</strong></div>
@@ -64,7 +68,7 @@
         <div><span>编码器计数</span><strong id="count">--</strong></div>
         <div><span>采集时间</span><strong id="elapsed">0.0 s</strong></div>
       </section>
-      <p class="footnote">曲线展示最近 30 秒。3 秒平均值需完整窗口；平均速度有方向，正反运动可能相互抵消。硬件量程为模拟值，真实设备须核实。</p>
+      <p class="footnote">曲线展示最近 30 秒；CSV 最多包含本次最近 72,000 个采样点。3 秒平均值需完整窗口；平均速度有方向，正反运动可能相互抵消。硬件量程为模拟值，真实设备须核实。</p>
     </main>
   </div>
   <script type="module" src="app.js"></script>
