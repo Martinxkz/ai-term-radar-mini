@@ -5,6 +5,7 @@ import select
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -32,6 +33,8 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.master, self.slave = os.openpty()
         self.stop_simulator = threading.Event()
         self.bad_crc = False
+        self.fail_requests = 0
+        self.drop_requests = 0
         self.requests = []
         self.simulator = threading.Thread(target=self.respond, daemon=True)
         self.simulator.start()
@@ -61,8 +64,14 @@ class DashboardIntegrationTests(unittest.TestCase):
             while len(buffered) >= 8:
                 request, buffered = buffered[:8], buffered[8:]
                 self.requests.append(request)
+                if self.drop_requests:
+                    self.drop_requests -= 1
+                    continue
                 frame = b"\x01\x03\x04" + count.to_bytes(4, "big")
-                crc = b"\x00\x00" if self.bad_crc else calculate_crc(frame)
+                bad = self.bad_crc or self.fail_requests > 0
+                if self.fail_requests:
+                    self.fail_requests -= 1
+                crc = b"\x00\x00" if bad else calculate_crc(frame)
                 os.write(self.master, frame + crc)
                 count += 500
 
@@ -117,6 +126,95 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: self.window.worker is None)
         self.assertIn("CRC", self.window.statusBar().currentMessage())
         self.assertIn("失效", self.window.values.text())
+        self.assertIn("连续 5 次", self.window.statusBar().currentMessage())
+
+    def test_temporary_crc_errors_recover_and_mark_gap(self):
+        self.window.start()
+        self.wait_for(lambda: len(self.window.history["time"]) > 3)
+        self.fail_requests = 2
+        self.wait_for(lambda: self.window.had_gap)
+        self.wait_for(lambda: self.window.had_gap and not self.window.gap_pending)
+        self.assertIsNotNone(self.window.worker)
+        self.wait_for(lambda: self.window.latest.speed is not None)
+        self.window.update_display()
+        self.assertIn("累计行程可能不准确", self.window.values.text())
+        self.window.stop()
+        self.wait_for(lambda: self.window.worker is None)
+        with next(Path(".").glob("encoder_*.csv")).open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        recovered = [row for row in rows if row["communication_gap"] == "1"]
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0]["speed_m_s"], "")
+        self.assertEqual(recovered[0]["acceleration_m_s2"], "")
+
+    def test_timeout_recovers_without_stopping(self):
+        self.drop_requests = 2
+        self.window.start()
+        self.wait_for(lambda: self.window.had_gap and not self.window.gap_pending)
+        self.wait_for(lambda: len(self.window.history["time"]) >= 2)
+        self.assertIsNotNone(self.window.worker)
+
+    def test_persistent_timeouts_stop_after_five_attempts(self):
+        self.drop_requests = 10
+        self.window.start()
+        self.wait_for(lambda: self.window.worker is None)
+        self.assertEqual(len(self.requests), 5)
+        self.assertIn("连续 5 次", self.window.statusBar().currentMessage())
+
+    def test_failure_counter_resets_after_recovery(self):
+        self.fail_requests = 4
+        self.window.start()
+        self.wait_for(lambda: self.window.had_gap and not self.window.gap_pending)
+        self.fail_requests = 4
+        self.wait_for(lambda: self.window.gap_pending)
+        self.wait_for(lambda: not self.window.gap_pending)
+        self.assertIsNotNone(self.window.worker)
+
+    def test_cp210x_detection_and_confirmation(self):
+        def port(device, description, vid=None, pid=None):
+            return SimpleNamespace(device=device, description=description, vid=vid, pid=pid)
+        candidates = [port("COM4", "Other"), port("COM7", "USB Serial", 0x10c4, 0xea60)]
+        with patch("encoder_dashboard.serial.tools.list_ports.comports", return_value=candidates):
+            self.window.port.setCurrentIndex(0)
+            self.window.refresh_ports()
+        self.assertEqual(self.window.port.currentData(), "COM7")
+        self.assertIsNone(self.window.confirmed_port)
+        self.assertIn("请确认", self.window.port_status.text())
+        self.window.confirm_selected_port()
+        self.assertEqual(self.window.confirmed_port, "COM7")
+        candidates.append(port("COM8", "Silicon Labs CP210x USB to UART Bridge"))
+        with patch("encoder_dashboard.serial.tools.list_ports.comports", return_value=candidates):
+            self.window.port.setCurrentIndex(0)
+            self.window.refresh_ports()
+        self.assertIsNone(self.window.port.currentData())
+        self.assertIn("多个", self.window.port_status.text())
+        with patch("encoder_dashboard.serial.tools.list_ports.comports", return_value=[]):
+            self.window.refresh_ports()
+        self.assertIsNone(self.window.port.currentData())
+        self.assertIn("未找到", self.window.port_status.text())
+
+    def test_dashboard_password_and_relock(self):
+        self.window.show()
+        self.app.processEvents()
+        self.assertFalse(self.window.professional)
+        self.assertTrue(self.window.baud.isHidden())
+        self.assertTrue(self.window.chart_cards["custom"].isHidden())
+        self.assertTrue(self.window.metric_cards["smooth_speed"].isHidden())
+        for key in ("travel", "max_speed", "min_speed"):
+            self.assertFalse(self.window.metric_cards[key].isHidden())
+        with patch("encoder_dashboard.QInputDialog.getText", return_value=("bad", True)), \
+                patch("encoder_dashboard.QMessageBox.warning") as warning:
+            self.window.toggle_dashboard()
+            warning.assert_called_once()
+        self.assertFalse(self.window.professional)
+        with patch("encoder_dashboard.QInputDialog.getText", return_value=("ENGNB", True)):
+            self.window.toggle_dashboard()
+        self.assertTrue(self.window.professional)
+        self.assertFalse(self.window.baud.isHidden())
+        self.assertFalse(self.window.chart_cards["custom"].isHidden())
+        self.window.toggle_dashboard()
+        self.assertFalse(self.window.professional)
+        self.assertTrue(self.window.chart_cards["custom"].isHidden())
 
     def test_closing_running_and_stopped_window(self):
         self.window.start()
@@ -280,7 +378,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.window.stats = SpeedStats()
         self.window.accepting = True
         self.window.last_sample_time = 1
-        now = time.monotonic()
+        now = int(time.monotonic())
         for elapsed in (0, 1, 3599, 3600, 3601):
             self.window.on_sample(now + elapsed, 0)
         self.assertEqual(list(self.window.history["time"]), [1, 3599, 3600, 3601])

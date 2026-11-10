@@ -22,6 +22,21 @@ class SpeedStatsTests(unittest.TestCase):
         self.assertIsNone(results[2].average_speed)
         self.assertAlmostEqual(results[3].average_speed, 7 / 5)
 
+    def test_gap_resets_derivatives_and_average_window(self):
+        calculator = MeasurementCalculator(resolution=1, circumference=1,
+                                           max_speed=10, average_seconds=5)
+        calculator.add(0, 0)
+        calculator.add(1, 1)
+        recovered = calculator.add(4, 4, gap=True)
+        self.assertEqual(recovered.displacement, 4)
+        self.assertEqual(recovered.travel, 4)
+        self.assertIsNone(recovered.speed)
+        after = calculator.add(5, 5)
+        self.assertEqual(after.speed, 1)
+        self.assertIsNone(after.acceleration)
+        self.assertIsNone(after.average_speed)
+        self.assertEqual(calculator.add(9, 9).average_speed, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

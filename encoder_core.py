@@ -91,7 +91,7 @@ class MeasurementCalculator:
         self.distance_history = deque()
         self.speed_history = deque()
 
-    def add(self, timestamp, count):
+    def add(self, timestamp, count, *, gap=False):
         if not math.isfinite(timestamp) or not isinstance(count, int) or not 0 <= count < 2**32:
             raise ValueError("时间戳或位置计数无效")
         if self.modulus and count >= self.modulus:
@@ -119,6 +119,14 @@ class MeasurementCalculator:
         elapsed = timestamp - self.start_time
         self.distance += distance_delta
         self.travel += abs(distance_delta)
+        if gap:
+            self.distance_history.clear()
+            self.distance_history.append((elapsed, self.distance))
+            self.speed_history.clear()
+            self.last_count, self.last_time = count, timestamp
+            self.last_speed = self.last_smooth_speed = self.last_dt = None
+            return Measurement(elapsed, count, self.distance, self.travel,
+                               None, None, None, None, None, None)
         alpha = -math.expm1(-dt / self.smoothing_seconds)
         smooth = speed if self.last_smooth_speed is None else (
             self.last_smooth_speed + alpha * (speed - self.last_smooth_speed)

@@ -14,16 +14,28 @@ from PyQt5.QtCore import QRectF, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from encoder_core import (MeasurementCalculator, RESOLUTION, WHEEL_CIRCUMFERENCE_M,
+from encoder_core import (MeasurementCalculator, RESOLUTION, WHEEL_CIRCUMFERENCE_M, calculate_crc,
                           parse_position_response, position_request)
 from encoder_stats import SpeedStats
 
 
 MAX_CHART_MINUTES = 60
+MAX_CONSECUTIVE_FAILURES = 5
+PROFESSIONAL_PASSWORD = "ENGNB"
+
+
+def is_cp210x(port):
+    description = (port.description or "").casefold()
+    return (getattr(port, "vid", None) == 0x10C4 and getattr(port, "pid", None) == 0xEA60
+            or "cp210x" in description)
+
+
+class TransientResponseError(Exception):
+    pass
 
 
 class SpeedGauge(QWidget):
@@ -77,6 +89,8 @@ class EncoderWorker(QThread):
     sample = pyqtSignal(float, int)
     connected = pyqtSignal()
     error = pyqtSignal(str)
+    retrying = pyqtSignal(str, int)
+    recovered = pyqtSignal()
 
     def __init__(self, port, baud, address, interval_ms):
         super().__init__()
@@ -88,25 +102,44 @@ class EncoderWorker(QThread):
             with serial.Serial(self.port, self.baud, timeout=0.15, write_timeout=0.2) as device:
                 self.connected.emit()
                 request = position_request(self.address)
+                failures = 0
                 while not self.isInterruptionRequested():
                     started = time.monotonic()
-                    device.reset_input_buffer()
-                    if device.write(request) != len(request):
-                        raise serial.SerialException("请求帧发送不完整")
-                    header = device.read(3)
-                    if len(header) != 3:
-                        raise serial.SerialException("读取超时或响应头不完整")
-                    if header[1] == 0x83:
-                        remaining = 2
-                    elif header[1] == 0x03 and header[2] == 4:
-                        remaining = 6
+                    try:
+                        device.reset_input_buffer()
+                        if device.write(request) != len(request):
+                            raise serial.SerialException("请求帧发送不完整")
+                        header = device.read(3)
+                        if len(header) != 3:
+                            raise TransientResponseError("读取超时或响应头不完整")
+                        if header[1] == 0x83:
+                            remaining = 2
+                        elif header[1] == 0x03 and header[2] == 4:
+                            remaining = 6
+                        else:
+                            raise TransientResponseError("响应功能码或数据长度不正确")
+                        tail = device.read(remaining)
+                        if len(tail) != remaining:
+                            raise TransientResponseError("读取超时或响应帧不完整")
+                        frame = header + tail
+                        if header[1] == 0x83:
+                            if frame[0] != self.address or calculate_crc(frame[:-2]) != frame[-2:]:
+                                raise TransientResponseError("异常响应站号或 CRC 校验失败")
+                            parse_position_response(frame, self.address)
+                        try:
+                            count = parse_position_response(frame, self.address)
+                        except ValueError as exc:
+                            raise TransientResponseError(str(exc)) from exc
+                    except TransientResponseError as exc:
+                        failures += 1
+                        if failures >= MAX_CONSECUTIVE_FAILURES:
+                            raise ValueError(f"连续 {failures} 次通信失败：{exc}") from exc
+                        self.retrying.emit(str(exc), failures)
                     else:
-                        raise serial.SerialException("响应功能码或数据长度不正确")
-                    tail = device.read(remaining)
-                    if len(tail) != remaining:
-                        raise serial.SerialException("读取超时或响应帧不完整")
-                    count = parse_position_response(header + tail, self.address)
-                    self.sample.emit(time.monotonic(), count)
+                        if failures:
+                            self.recovered.emit()
+                        failures = 0
+                        self.sample.emit(time.monotonic(), count)
                     deadline = started + self.interval
                     while not self.isInterruptionRequested() and time.monotonic() < deadline:
                         self.msleep(min(10, max(1, int((deadline - time.monotonic()) * 1000))))
@@ -153,7 +186,7 @@ class SimulatorWorker(QThread):
 class EncoderDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RS485 编码器板链监控")
+        self.setWindowTitle("RS485 编码器板链监控 V0.4")
         self.setWindowIcon(QIcon(str(resource_path("web/comau-logo.png"))))
         self.resize(1250, 900)
         self.worker = self.calculator = self.csv_file = self.csv_writer = None
@@ -163,10 +196,14 @@ class EncoderDashboard(QMainWindow):
         self.history = {}
         self.confirmed_port = None
         self.simulation = False
+        self.professional = False
+        self.gap_pending = False
+        self.had_gap = False
         self.stats = SpeedStats()
         self.last_long_redraw = 0.0
         self.output_dir = None
         self.init_ui()
+        self.set_dashboard_mode(False)
         self.refresh_ports()
         self.display_timer = QTimer(self)
         self.display_timer.timeout.connect(self.update_display)
@@ -227,6 +264,9 @@ class EncoderDashboard(QMainWindow):
         heading_text.addWidget(title)
         heading_text.addWidget(subtitle)
         heading.addLayout(heading_text, 1)
+        self.dashboard_button = QPushButton("解锁专业看板")
+        self.dashboard_button.clicked.connect(self.toggle_dashboard)
+        heading.addWidget(self.dashboard_button)
         self.mode_label = QLabel("真实编码器 · 未连接")
         self.mode_label.setStyleSheet("font-weight: bold; color: #174e80; padding: 8px;")
         heading.addWidget(self.mode_label)
@@ -238,7 +278,13 @@ class EncoderDashboard(QMainWindow):
         control_layout.setContentsMargins(20, 17, 20, 17)
         control_title = QLabel("01 / 采集设置")
         control_title.setObjectName("sectionTitle")
-        control_layout.addWidget(control_title)
+        control_heading = QHBoxLayout()
+        control_heading.addWidget(control_title)
+        adapter_notice = QLabel("默认使用 Silicon Labs CP210x USB to UART Bridge")
+        adapter_notice.setStyleSheet("color: #b91c1c; font-weight: 900;")
+        adapter_notice.setWordWrap(True)
+        control_heading.addWidget(adapter_notice, 1)
+        control_layout.addLayout(control_heading)
         controls = QHBoxLayout()
         controls.setSpacing(18)
         self.port = QComboBox()
@@ -267,13 +313,17 @@ class EncoderDashboard(QMainWindow):
         form = QGridLayout()
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(4)
+        self.professional_controls = []
         for index, (label, widget) in enumerate((
-                ("端口", self.port), ("波特率", self.baud), ("站号", self.address),
-                ("轮询周期", self.interval), ("合理速度上限", self.limit))):
+                ("端口", self.port), ("合理速度上限", self.limit), ("波特率", self.baud),
+                ("站号", self.address), ("轮询周期", self.interval))):
             row, column = divmod(index, 3)
-            form.addWidget(QLabel(label), row * 2, column)
+            label_widget = QLabel(label)
+            form.addWidget(label_widget, row * 2, column)
             form.addWidget(widget, row * 2 + 1, column)
             form.setColumnStretch(column, 1)
+            if widget in (self.baud, self.address, self.interval):
+                self.professional_controls.extend((label_widget, widget))
         controls.addLayout(form, 3)
         buttons = QGridLayout()
         buttons.addWidget(self.refresh, 0, 0)
@@ -285,6 +335,7 @@ class EncoderDashboard(QMainWindow):
         buttons.addWidget(self.connect_button, 1, 1)
         self.simulation_button = QPushButton("模拟输入设置…")
         self.simulation_button.clicked.connect(self.show_simulation_dialog)
+        self.professional_controls.append(self.simulation_button)
         buttons.addWidget(self.simulation_button, 2, 0)
         controls.addLayout(buttons, 2)
         control_layout.addLayout(controls)
@@ -308,6 +359,7 @@ class EncoderDashboard(QMainWindow):
         layout.addWidget(metric_title)
         monitor = QHBoxLayout()
         self.metric_labels = {}
+        self.metric_cards = {}
         gauge_card = QFrame()
         gauge_card.setObjectName("glassCard")
         gauge_layout = QVBoxLayout(gauge_card)
@@ -317,7 +369,7 @@ class EncoderDashboard(QMainWindow):
         self.gauge = SpeedGauge()
         gauge_layout.addWidget(self.gauge, 1)
         monitor.addWidget(gauge_card, 2)
-        metric_grid = QGridLayout()
+        metric_grid = self.metric_grid = QGridLayout()
         secondary = (
             ("smooth_speed", "平滑速度", "m/s"),
             ("acceleration", "实时加速度", "m/s²"),
@@ -362,9 +414,11 @@ class EncoderDashboard(QMainWindow):
         )
         self.curves = {}
         self.scale_labels = {}
+        self.chart_cards = {}
         charts = QGridLayout()
         for key, title_text, y_label, series in plot_definitions:
             card = QFrame()
+            self.chart_cards[key] = card
             card.setObjectName("glassCard")
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(18, 14, 18, 14)
@@ -441,7 +495,41 @@ class EncoderDashboard(QMainWindow):
         content.addWidget(value)
         content.addWidget(unit_label)
         self.metric_labels[key] = value
+        self.metric_cards[key] = card
         return card
+
+    def toggle_dashboard(self):
+        if self.professional:
+            self.set_dashboard_mode(False)
+            return
+        password, ok = QInputDialog.getText(self, "解锁专业看板", "请输入密码：", QLineEdit.Password)
+        if not ok:
+            return
+        if password != PROFESSIONAL_PASSWORD:
+            QMessageBox.warning(self, "解锁失败", "密码不正确。")
+            return
+        self.set_dashboard_mode(True)
+
+    def set_dashboard_mode(self, professional):
+        self.professional = professional
+        self.dashboard_button.setText("返回默认看板" if professional else "解锁专业看板")
+        for widget in self.professional_controls:
+            widget.setVisible(professional)
+        for key in ("smooth_speed", "acceleration", "smooth_acceleration", "displacement", "fluctuation"):
+            self.metric_cards[key].setVisible(professional)
+        if professional:
+            for index, key in enumerate(("smooth_speed", "acceleration", "smooth_acceleration",
+                                         "displacement", "travel")):
+                self.metric_grid.addWidget(self.metric_cards[key], index // 3, index % 3)
+            for index, key in enumerate(("max_speed", "min_speed", "fluctuation")):
+                self.metric_grid.addWidget(self.metric_cards[key], 2, index)
+        else:
+            self.metric_grid.addWidget(self.metric_cards["travel"], 0, 0, 1, 2)
+            self.metric_grid.addWidget(self.metric_cards["max_speed"], 1, 0)
+            self.metric_grid.addWidget(self.metric_cards["min_speed"], 1, 1)
+        self.chart_cards["custom"].setVisible(professional)
+        if professional:
+            self.update_long_plot()
 
     def update_speed_ranges(self):
         if not hasattr(self, "plots") or "custom" not in self.plots:
@@ -458,11 +546,20 @@ class EncoderDashboard(QMainWindow):
         self.invalidate_port()
         self.port.clear()
         self.port.addItem("请选择 COM 口", None)
-        for port in serial.tools.list_ports.comports():
+        ports = list(serial.tools.list_ports.comports())
+        matches = [port for port in ports if is_cp210x(port)]
+        for port in ports:
             self.port.addItem(f"{port.device} — {port.description}", port.device)
-        index = self.port.findData(current) if current else 0
-        if index >= 0:
-            self.port.setCurrentIndex(index)
+        index = self.port.findData(current) if current else -1
+        if index < 0 and len(matches) == 1:
+            index = self.port.findData(matches[0].device)
+        self.port.setCurrentIndex(max(0, index))
+        if len(matches) > 1 and index <= 0:
+            self.port_status.setText("发现多个 CP210x，请手动选择并确认")
+        elif len(matches) == 1 and self.port.currentData() == matches[0].device:
+            self.port_status.setText("已找到 CP210x，请确认")
+        elif not matches:
+            self.port_status.setText("未找到 CP210x，请检查或手动选择")
 
     def invalidate_port(self):
         self.confirmed_port = None
@@ -550,7 +647,8 @@ class EncoderDashboard(QMainWindow):
                                  "speed_m_s", "smooth_speed_m_s", "average_speed_5s_m_s",
                                  "acceleration_m_s2", "smooth_acceleration_m_s2",
                                  "run_min_speed_m_s", "run_min_elapsed_s",
-                                 "run_max_speed_m_s", "run_max_elapsed_s"])
+                                 "run_max_speed_m_s", "run_max_elapsed_s",
+                                 "communication_gap"])
                 csv_file.flush()
             except OSError:
                 csv_file.close()
@@ -574,6 +672,8 @@ class EncoderDashboard(QMainWindow):
         self.values.setText("正在连接，等待第一个有效位置…")
         self.failure = None
         self.last_sample_time = None
+        self.gap_pending = False
+        self.had_gap = False
         self.accepting = True
         self.simulation = simulation
         self.mode_label.setText("模拟输入 · 非真实设备" if simulation else f"真实编码器 · {port}")
@@ -586,6 +686,9 @@ class EncoderDashboard(QMainWindow):
         self.worker.connected.connect(self.on_connected)
         self.worker.sample.connect(self.on_sample)
         self.worker.error.connect(self.on_error)
+        if not simulation:
+            self.worker.retrying.connect(self.on_retrying)
+            self.worker.recovered.connect(self.on_recovered)
         self.worker.finished.connect(self.on_finished)
         self.set_controls_enabled(False)
         self.connect_button.setText("停止并保存")
@@ -601,7 +704,9 @@ class EncoderDashboard(QMainWindow):
         if not self.accepting:
             return
         try:
-            measurement = self.calculator.add(timestamp, count)
+            measurement = self.calculator.add(timestamp, count, gap=self.gap_pending)
+            if self.gap_pending:
+                self.stats.window.clear()
             self.stats.add(measurement.elapsed, measurement.speed)
             minimum, maximum = self.stats.minimum, self.stats.maximum
             row = [measurement.elapsed, measurement.count, measurement.displacement,
@@ -609,7 +714,8 @@ class EncoderDashboard(QMainWindow):
                    measurement.average_speed, measurement.acceleration,
                    measurement.smooth_acceleration,
                    minimum[1] if minimum else None, minimum[0] if minimum else None,
-                   maximum[1] if maximum else None, maximum[0] if maximum else None]
+                   maximum[1] if maximum else None, maximum[0] if maximum else None,
+                   1 if self.gap_pending else 0]
             self.csv_writer.writerow(["" if value is None else value for value in row])
             self.csv_file.flush()
         except (ValueError, OSError, csv.Error) as exc:
@@ -620,6 +726,7 @@ class EncoderDashboard(QMainWindow):
             kind = "模拟数据" if self.simulation else "真实编码器有效数据"
             self.statusBar().showMessage(f"已收到{kind}；CSV：{self.csv_file.name}")
         self.last_sample_time = timestamp
+        self.gap_pending = False
         self.history["time"].append(measurement.elapsed)
         for name in self.history:
             if name == "time":
@@ -630,6 +737,21 @@ class EncoderDashboard(QMainWindow):
             for samples in self.history.values():
                 samples.popleft()
         self.latest = measurement
+
+    def on_retrying(self, message, failures):
+        if not self.accepting:
+            return
+        self.gap_pending = True
+        self.had_gap = True
+        self.values.setText(f"通信异常，正在重试（{failures}/{MAX_CONSECUTIVE_FAILURES}）：{message}")
+        self.statusBar().showMessage(self.values.text())
+        self.gauge.set_value(None, self.limit.value())
+        for label in self.metric_labels.values():
+            label.setText("--")
+
+    def on_recovered(self):
+        if self.accepting:
+            self.statusBar().showMessage("通信已恢复；丢失期间运动及累计行程可能不准确，CSV 已标记。")
 
     def on_error(self, message):
         self.failure = message
@@ -666,11 +788,12 @@ class EncoderDashboard(QMainWindow):
             self.values.setText(f"数据已失效：{self.failure}")
         else:
             self.statusBar().showMessage(f"已停止；CSV 已保存至 {self.output_dir.resolve()}")
-            self.values.setText("已停止；曲线为上次采集数据。")
+            self.values.setText("已停止；曲线为上次采集数据。" +
+                                (" 本次存在通信中断，累计行程可能不准确。" if self.had_gap else ""))
         self.mode_label.setText("模拟输入 · 已停止" if self.simulation else "真实编码器 · 已停止")
 
     def update_display(self):
-        if not self.accepting or self.last_sample_time is None:
+        if not self.accepting or self.last_sample_time is None or self.gap_pending:
             return
         if time.monotonic() - self.last_sample_time > max(1.0, self.interval.value() / 1000 * 3):
             self.values.setText("数据已过期：正在等待编码器响应")
@@ -679,7 +802,10 @@ class EncoderDashboard(QMainWindow):
             self.gauge.set_value(None, self.limit.value())
             return
         m = self.latest
-        self.values.setText("模拟数据，未连接设备" if self.simulation else "正在采集真实编码器数据")
+        status = "模拟数据，未连接设备" if self.simulation else "正在采集真实编码器数据"
+        if self.had_gap:
+            status += "；曾发生通信中断，累计行程可能不准确"
+        self.values.setText(status)
         self.gauge.set_value(m.speed, self.limit.value())
         for name in ("smooth_speed", "acceleration", "smooth_acceleration", "displacement", "travel"):
             label = self.metric_labels[name]
@@ -703,7 +829,7 @@ class EncoderDashboard(QMainWindow):
             self.curves[name].setData(columns[0], columns[index])
         end = max(60.0, m.elapsed)
         self.plots["speed"].setXRange(end - 60.0, end, padding=0)
-        if time.monotonic() - self.last_long_redraw >= 1.0:
+        if self.professional and time.monotonic() - self.last_long_redraw >= 1.0:
             self.update_long_plot()
 
     def update_long_plot(self, *_):
