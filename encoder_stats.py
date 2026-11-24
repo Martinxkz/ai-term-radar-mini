@@ -30,3 +30,16 @@ class SpeedStats:
         for value in speeds:
             low, high = min(low, value), max(high, value)
         return low, high
+
+    def run_summary(self, elapsed, displacement):
+        if elapsed <= 0 or self.minimum is None:
+            return None
+        average = displacement / elapsed
+        return average, self.minimum[1] - average, self.maximum[1] - average
+
+    def run_deviation_percent(self, elapsed, displacement):
+        summary = self.run_summary(elapsed, displacement)
+        if summary is None or summary[0] == 0:
+            return None
+        return (summary[1] / abs(summary[0]) * 100,
+                summary[2] / abs(summary[0]) * 100)

@@ -28,6 +28,13 @@ MAX_CONSECUTIVE_FAILURES = 5
 PROFESSIONAL_PASSWORD = "ENGNB"
 
 
+def format_stopwatch(seconds):
+    tenths = int(max(0, seconds) * 10)
+    hours, remainder = divmod(tenths, 36000)
+    minutes, remainder = divmod(remainder, 600)
+    return f"{hours:02d}:{minutes:02d}:{remainder // 10:02d}.{remainder % 10}"
+
+
 def is_cp210x(port):
     description = (port.description or "").casefold()
     return (getattr(port, "vid", None) == 0x10C4 and getattr(port, "pid", None) == 0xEA60
@@ -186,7 +193,7 @@ class SimulatorWorker(QThread):
 class EncoderDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RS485 编码器板链监控 V0.4")
+        self.setWindowTitle("RS485 编码器板链监控 V0.5")
         self.setWindowIcon(QIcon(str(resource_path("web/comau-logo.png"))))
         self.resize(1250, 900)
         self.worker = self.calculator = self.csv_file = self.csv_writer = None
@@ -199,6 +206,8 @@ class EncoderDashboard(QMainWindow):
         self.professional = False
         self.gap_pending = False
         self.had_gap = False
+        self.run_started = None
+        self.run_elapsed = 0.0
         self.stats = SpeedStats()
         self.last_long_redraw = 0.0
         self.output_dir = None
@@ -385,6 +394,13 @@ class EncoderDashboard(QMainWindow):
             card = self.metric_card(key, label, "m/s", "", False)
             self.metric_labels[key].setWordWrap(True)
             metric_grid.addWidget(card, 2, i)
+        for key, label, unit in (("stopwatch", "本次监控时间", "时:分:秒"),
+                                 ("run_average", "本次平均速度（带方向）", "m/s"),
+                                 ("run_deviation", "相对平均速度偏差（最小 / 最大）", "%")):
+            card = self.metric_card(key, label, unit, "", False)
+            self.metric_labels[key].setWordWrap(True)
+            metric_grid.addWidget(card)
+        self.metric_labels["stopwatch"].setText(format_stopwatch(0))
         monitor.addLayout(metric_grid, 5)
         layout.addLayout(monitor)
         self.values = QLabel("等待采集")
@@ -515,7 +531,8 @@ class EncoderDashboard(QMainWindow):
         self.dashboard_button.setText("返回默认看板" if professional else "解锁专业看板")
         for widget in self.professional_controls:
             widget.setVisible(professional)
-        for key in ("smooth_speed", "acceleration", "smooth_acceleration", "displacement", "fluctuation"):
+        for key in ("smooth_speed", "acceleration", "smooth_acceleration", "displacement",
+                    "fluctuation", "max_speed", "min_speed"):
             self.metric_cards[key].setVisible(professional)
         if professional:
             for index, key in enumerate(("smooth_speed", "acceleration", "smooth_acceleration",
@@ -523,10 +540,11 @@ class EncoderDashboard(QMainWindow):
                 self.metric_grid.addWidget(self.metric_cards[key], index // 3, index % 3)
             for index, key in enumerate(("max_speed", "min_speed", "fluctuation")):
                 self.metric_grid.addWidget(self.metric_cards[key], 2, index)
+            for index, key in enumerate(("stopwatch", "run_average", "run_deviation")):
+                self.metric_grid.addWidget(self.metric_cards[key], 3, index)
         else:
-            self.metric_grid.addWidget(self.metric_cards["travel"], 0, 0, 1, 2)
-            self.metric_grid.addWidget(self.metric_cards["max_speed"], 1, 0)
-            self.metric_grid.addWidget(self.metric_cards["min_speed"], 1, 1)
+            for index, key in enumerate(("travel", "stopwatch", "run_average", "run_deviation")):
+                self.metric_grid.addWidget(self.metric_cards[key], index // 2, index % 2)
         self.chart_cards["custom"].setVisible(professional)
         if professional:
             self.update_long_plot()
@@ -648,7 +666,9 @@ class EncoderDashboard(QMainWindow):
                                  "acceleration_m_s2", "smooth_acceleration_m_s2",
                                  "run_min_speed_m_s", "run_min_elapsed_s",
                                  "run_max_speed_m_s", "run_max_elapsed_s",
-                                 "communication_gap"])
+                                 "communication_gap", "monitor_elapsed_s", "run_average_speed_m_s",
+                                 "run_min_deviation_m_s", "run_max_deviation_m_s",
+                                 "run_min_deviation_percent", "run_max_deviation_percent"])
                 csv_file.flush()
             except OSError:
                 csv_file.close()
@@ -665,6 +685,9 @@ class EncoderDashboard(QMainWindow):
             curve.clear()
         for label in self.metric_labels.values():
             label.setText("--")
+        self.run_started = time.monotonic()
+        self.run_elapsed = 0.0
+        self.metric_labels["stopwatch"].setText(format_stopwatch(0))
         self.gauge.set_value(None, self.limit.value())
         self.plots["speed"].setXRange(0, 60, padding=0)
         self.plots["custom"].setXRange(0, self.long_minutes.value(), padding=0)
@@ -709,13 +732,18 @@ class EncoderDashboard(QMainWindow):
                 self.stats.window.clear()
             self.stats.add(measurement.elapsed, measurement.speed)
             minimum, maximum = self.stats.minimum, self.stats.maximum
+            summary = self.stats.run_summary(measurement.elapsed, measurement.displacement)
+            deviation_percent = self.stats.run_deviation_percent(measurement.elapsed, measurement.displacement)
             row = [measurement.elapsed, measurement.count, measurement.displacement,
                    measurement.travel, measurement.speed, measurement.smooth_speed,
                    measurement.average_speed, measurement.acceleration,
                    measurement.smooth_acceleration,
                    minimum[1] if minimum else None, minimum[0] if minimum else None,
                    maximum[1] if maximum else None, maximum[0] if maximum else None,
-                   1 if self.gap_pending else 0]
+                   1 if self.gap_pending else 0,
+                   max(0.0, timestamp - self.run_started) if self.run_started is not None else None,
+                   *(summary if summary else (None, None, None)),
+                   *(deviation_percent if deviation_percent else (None, None))]
             self.csv_writer.writerow(["" if value is None else value for value in row])
             self.csv_file.flush()
         except (ValueError, OSError, csv.Error) as exc:
@@ -737,6 +765,23 @@ class EncoderDashboard(QMainWindow):
             for samples in self.history.values():
                 samples.popleft()
         self.latest = measurement
+        self.update_run_summary(measurement)
+
+    def update_run_summary(self, measurement):
+        summary = self.stats.run_summary(measurement.elapsed, measurement.displacement)
+        deviation_percent = self.stats.run_deviation_percent(measurement.elapsed, measurement.displacement)
+        self.metric_labels["run_average"].setText("--" if summary is None else f"{summary[0]:.4f}")
+        self.metric_labels["run_deviation"].setText(
+            "--" if deviation_percent is None else f"{deviation_percent[0]:+.1f}% / {deviation_percent[1]:+.1f}%")
+
+    def update_stopwatch(self):
+        if self.run_started is not None:
+            self.run_elapsed = max(0.0, time.monotonic() - self.run_started)
+        self.metric_labels["stopwatch"].setText(format_stopwatch(self.run_elapsed))
+
+    def freeze_stopwatch(self):
+        self.update_stopwatch()
+        self.run_started = None
 
     def on_retrying(self, message, failures):
         if not self.accepting:
@@ -746,23 +791,23 @@ class EncoderDashboard(QMainWindow):
         self.values.setText(f"通信异常，正在重试（{failures}/{MAX_CONSECUTIVE_FAILURES}）：{message}")
         self.statusBar().showMessage(self.values.text())
         self.gauge.set_value(None, self.limit.value())
-        for label in self.metric_labels.values():
-            label.setText("--")
+        self.clear_live_metrics()
 
     def on_recovered(self):
         if self.accepting:
             self.statusBar().showMessage("通信已恢复；丢失期间运动及累计行程可能不准确，CSV 已标记。")
 
     def on_error(self, message):
+        self.freeze_stopwatch()
         self.failure = message
         self.accepting = False
         self.statusBar().showMessage(f"采集已中断：{message}")
         self.values.setText(f"数据已失效：{message}")
-        for label in self.metric_labels.values():
-            label.setText("--")
+        self.clear_live_metrics()
         self.gauge.set_value(None, self.limit.value())
 
     def stop(self):
+        self.freeze_stopwatch()
         self.accepting = False
         self.gauge.set_value(None, self.limit.value())
         if self.worker is not None:
@@ -772,6 +817,8 @@ class EncoderDashboard(QMainWindow):
                 self.statusBar().showMessage("正在停止采集…")
 
     def on_finished(self):
+        if self.run_started is not None:
+            self.freeze_stopwatch()
         self.accepting = False
         if self.csv_file:
             try:
@@ -793,12 +840,12 @@ class EncoderDashboard(QMainWindow):
         self.mode_label.setText("模拟输入 · 已停止" if self.simulation else "真实编码器 · 已停止")
 
     def update_display(self):
+        self.update_stopwatch()
         if not self.accepting or self.last_sample_time is None or self.gap_pending:
             return
         if time.monotonic() - self.last_sample_time > max(1.0, self.interval.value() / 1000 * 3):
             self.values.setText("数据已过期：正在等待编码器响应")
-            for label in self.metric_labels.values():
-                label.setText("--")
+            self.clear_live_metrics()
             self.gauge.set_value(None, self.limit.value())
             return
         m = self.latest
@@ -831,6 +878,11 @@ class EncoderDashboard(QMainWindow):
         self.plots["speed"].setXRange(end - 60.0, end, padding=0)
         if self.professional and time.monotonic() - self.last_long_redraw >= 1.0:
             self.update_long_plot()
+
+    def clear_live_metrics(self):
+        for name in ("smooth_speed", "acceleration", "smooth_acceleration", "displacement",
+                     "travel", "max_speed", "min_speed", "fluctuation"):
+            self.metric_labels[name].setText("--")
 
     def update_long_plot(self, *_):
         if "custom" not in self.plots:

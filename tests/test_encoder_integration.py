@@ -200,8 +200,10 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.baud.isHidden())
         self.assertTrue(self.window.chart_cards["custom"].isHidden())
         self.assertTrue(self.window.metric_cards["smooth_speed"].isHidden())
-        for key in ("travel", "max_speed", "min_speed"):
+        for key in ("travel", "stopwatch", "run_average", "run_deviation"):
             self.assertFalse(self.window.metric_cards[key].isHidden())
+        for key in ("max_speed", "min_speed"):
+            self.assertTrue(self.window.metric_cards[key].isHidden())
         with patch("encoder_dashboard.QInputDialog.getText", return_value=("bad", True)), \
                 patch("encoder_dashboard.QMessageBox.warning") as warning:
             self.window.toggle_dashboard()
@@ -212,9 +214,76 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.professional)
         self.assertFalse(self.window.baud.isHidden())
         self.assertFalse(self.window.chart_cards["custom"].isHidden())
+        self.assertFalse(self.window.metric_cards["max_speed"].isHidden())
+        self.assertFalse(self.window.metric_cards["min_speed"].isHidden())
         self.window.toggle_dashboard()
         self.assertFalse(self.window.professional)
         self.assertTrue(self.window.chart_cards["custom"].isHidden())
+        self.assertTrue(self.window.metric_cards["max_speed"].isHidden())
+
+    def test_run_summary_clock_csv_and_restart(self):
+        self.window.start_simulation(0.6, 0.3)
+        self.wait_for(lambda: len(self.window.history["time"]) > 4)
+        self.window.update_display()
+        m = self.window.latest
+        summary = self.window.stats.run_summary(m.elapsed, m.displacement)
+        percentage = self.window.stats.run_deviation_percent(m.elapsed, m.displacement)
+        self.assertEqual(self.window.metric_labels["run_average"].text(), f"{summary[0]:.4f}")
+        self.assertEqual(self.window.metric_labels["run_deviation"].text(),
+                         f"{percentage[0]:+.1f}% / {percentage[1]:+.1f}%")
+        self.window.stop()
+        frozen = self.window.run_elapsed
+        self.wait_for(lambda: self.window.worker is None)
+        time.sleep(0.15)
+        self.window.update_display()
+        self.assertEqual(self.window.run_elapsed, frozen)
+        self.assertNotEqual(self.window.metric_labels["run_average"].text(), "--")
+        with next(Path(".").glob("simulation_*.csv")).open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(rows[0]["run_average_speed_m_s"], "")
+        row = rows[-1]
+        self.assertAlmostEqual(float(row["run_average_speed_m_s"]),
+                               float(row["displacement_m"]) / float(row["elapsed_s"]))
+        self.assertAlmostEqual(float(row["run_min_deviation_m_s"]),
+                               float(row["run_min_speed_m_s"]) - float(row["run_average_speed_m_s"]))
+        self.assertAlmostEqual(float(row["run_max_deviation_m_s"]),
+                               float(row["run_max_speed_m_s"]) - float(row["run_average_speed_m_s"]))
+        self.assertAlmostEqual(float(row["run_min_deviation_percent"]),
+                               float(row["run_min_deviation_m_s"]) /
+                               abs(float(row["run_average_speed_m_s"])) * 100)
+        self.assertAlmostEqual(float(row["run_max_deviation_percent"]),
+                               float(row["run_max_deviation_m_s"]) /
+                               abs(float(row["run_average_speed_m_s"])) * 100)
+        self.assertGreater(float(row["monitor_elapsed_s"]), 0)
+        self.window.start_simulation(0.6, 0.3)
+        self.assertEqual(self.window.metric_labels["run_average"].text(), "--")
+        self.assertEqual(self.window.metric_labels["stopwatch"].text(), "00:00:00.0")
+        self.assertIsNone(self.window.stats.minimum)
+
+    def test_stopwatch_continues_during_retry_and_freezes_on_error(self):
+        self.window.start_simulation(0.6, 0.3)
+        self.wait_for(lambda: len(self.window.history["time"]) > 2)
+        self.window.on_retrying("测试", 1)
+        before = self.window.run_elapsed
+        time.sleep(0.12)
+        self.window.update_display()
+        self.assertGreater(self.window.run_elapsed, before)
+        self.assertNotEqual(self.window.metric_labels["run_average"].text(), "--")
+        self.window.on_error("测试")
+        frozen = self.window.run_elapsed
+        time.sleep(0.12)
+        self.window.update_display()
+        self.assertEqual(self.window.run_elapsed, frozen)
+        self.window.stop()
+
+    def test_percentage_display_rounding_and_zero_mean(self):
+        self.window.stats.add(1, -3)
+        self.window.stats.add(2, 1)
+        self.window.update_run_summary(SimpleNamespace(elapsed=3, displacement=-4))
+        self.assertEqual(self.window.metric_labels["run_deviation"].text(), "-125.0% / +175.0%")
+        self.window.update_run_summary(SimpleNamespace(elapsed=3, displacement=0))
+        self.assertEqual(self.window.metric_labels["run_average"].text(), "0.0000")
+        self.assertEqual(self.window.metric_labels["run_deviation"].text(), "--")
 
     def test_closing_running_and_stopped_window(self):
         self.window.start()

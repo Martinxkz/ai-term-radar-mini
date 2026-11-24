@@ -5,6 +5,17 @@ from encoder_stats import SpeedStats
 
 
 class SpeedStatsTests(unittest.TestCase):
+    def test_run_summary_signed_and_zero_average(self):
+        stats = SpeedStats()
+        self.assertIsNone(stats.run_summary(0, 0))
+        stats.add(1, -3)
+        stats.add(4, 1)
+        self.assertEqual(stats.run_summary(4, -4), (-1, -2, 2))
+        self.assertEqual(stats.run_deviation_percent(4, -4), (-200, 200))
+        self.assertEqual(stats.run_summary(4, 0), (0, -3, 1))
+        self.assertIsNone(stats.run_deviation_percent(4, 0))
+        self.assertEqual(stats.run_summary(4, 4), (1, -4, 0))
+        self.assertEqual(stats.run_deviation_percent(4, 4), (-400, 0))
     def test_extremes_and_time_window(self):
         stats = SpeedStats()
         for timestamp, speed in [(0, None), (1, 2), (2, -1), (6, 2), (7.01, 0.5)]:
